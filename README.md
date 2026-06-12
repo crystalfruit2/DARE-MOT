@@ -1,302 +1,214 @@
-# ByteTrack
+# DARE-MOT: Edge-Optimized Multi-Drone Target Tracking
 
-[![PWC](https://img.shields.io/endpoint.svg?url=https://paperswithcode.com/badge/bytetrack-multi-object-tracking-by-1/multi-object-tracking-on-mot17)](https://paperswithcode.com/sota/multi-object-tracking-on-mot17?p=bytetrack-multi-object-tracking-by-1)
+**Dynamic Aggregation for Real-time Edge MOT**
 
-[![PWC](https://img.shields.io/endpoint.svg?url=https://paperswithcode.com/badge/bytetrack-multi-object-tracking-by-1/multi-object-tracking-on-mot20-1)](https://paperswithcode.com/sota/multi-object-tracking-on-mot20-1?p=bytetrack-multi-object-tracking-by-1)
+> Research Report submitted to the 4th EELISA Scientific Competition — April 2026  
+> **Author:** Alp Eldam — Istanbul Technical University  
+> **Supervisor:** Prof. Farzad Hashemzadeh  
+> **Funding:** TÜBİTAK 1001, Project No. 125E327
 
-#### ByteTrack is a simple, fast and strong multi-object tracker.
+---
 
-<p align="center"><img src="assets/sota.png" width="500"/></p>
+## What is DARE-MOT?
 
-> [**ByteTrack: Multi-Object Tracking by Associating Every Detection Box**](https://arxiv.org/abs/2110.06864)
-> 
-> Yifu Zhang, Peize Sun, Yi Jiang, Dongdong Yu, Fucheng Weng, Zehuan Yuan, Ping Luo, Wenyu Liu, Xinggang Wang
-> 
-> *[arXiv 2110.06864](https://arxiv.org/abs/2110.06864)*
+DARE-MOT is a multi-object tracking system designed specifically for **UAV (drone) swarms running on edge hardware** like the NVIDIA Jetson. It extends [ByteTrack](https://github.com/ifzhang/ByteTrack) with a novel memory update mechanism that prevents identity loss during occlusions and motion blur — the two most common failure modes in aerial tracking.
 
-## Demo Links
-| Google Colab Demo | Huggingface Demo |                  YouTube Tutorial                   | Original Paper: ByteTrack |
-|:-----------------:|:----------------:|:---------------------------------------------------:|:-------------------------:|
-|[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1bDilg4cmXFa8HCKHbsZ_p16p0vrhLyu0?usp=sharing)|[![Hugging Face Spaces](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Spaces-blue)](https://huggingface.co/spaces/akhaliq/bytetrack)|[![YouTube](https://badges.aleen42.com/src/youtube.svg)](https://youtu.be/QCG8QMhga9k)|[arXiv 2110.06864](https://arxiv.org/abs/2110.06864) |
-* Integrated to [Huggingface Spaces](https://huggingface.co/spaces) with [Gradio](https://github.com/gradio-app/gradio).
+The key insight: standard trackers blindly update their memory of a target even when the camera image is corrupted (tree occlusion, motion blur, sudden maneuver). DARE-MOT detects when an observation is unreliable and freezes the memory instead, preserving a clean historical identity template.
 
+---
 
-## Abstract
-Multi-object tracking (MOT) aims at estimating bounding boxes and identities of objects in videos. Most methods obtain identities by associating detection boxes whose scores are higher than a threshold. The objects with low detection scores, e.g. occluded objects, are simply thrown away, which brings non-negligible true object missing and fragmented trajectories. To solve this problem, we present a simple, effective and generic association method, tracking by associating every detection box instead of only the high score ones. For the low score detection boxes, we utilize their similarities with tracklets to recover true objects and filter out the background detections. When applied to 9 different state-of-the-art trackers, our method achieves consistent improvement on IDF1 scores ranging from 1 to 10 points. To put forwards the state-of-the-art performance of MOT, we design a simple and strong tracker, named ByteTrack. For the first time, we achieve 80.3 MOTA, 77.3 IDF1 and 63.1 HOTA on the test set of MOT17 with 30 FPS running speed on a single V100 GPU.
-<p align="center"><img src="assets/teasing.png" width="400"/></p>
+## The Problem: Template Pollution
 
-## News
-* (2022.07) Our paper is accepted by ECCV 2022!
-* (2022.06) A [nice re-implementation](https://github.com/PaddlePaddle/PaddleDetection/tree/develop/configs/mot/bytetrack) by Baidu [PaddleDetection](https://github.com/PaddlePaddle/PaddleDetection)!
+In a standard JDE (Joint Detection and Embedding) tracker, each target maintains a "memory template" that is updated every frame via **Exponential Moving Average (EMA)**:
 
-## Tracking performance
-### Results on MOT challenge test set
-| Dataset    |  MOTA | IDF1 | HOTA | MT | ML | FP | FN | IDs | FPS |
-|------------|-------|------|------|-------|-------|------|------|------|------|
-|MOT17       | 80.3 | 77.3 | 63.1 | 53.2% | 14.5% | 25491 | 83721 | 2196 | 29.6 |
-|MOT20       | 77.8 | 75.2 | 61.3 | 69.2% | 9.5%  | 26249 | 87594 | 1223 | 13.7 |
+$$F^t = (1 - \gamma) F^{t-1} + \gamma f^t$$
 
-### Visualization results on MOT challenge test set
-<img src="assets/MOT17-01-SDP.gif" width="400"/>   <img src="assets/MOT17-07-SDP.gif" width="400"/>
-<img src="assets/MOT20-07.gif" width="400"/>   <img src="assets/MOT20-08.gif" width="400"/>
+where $f^t$ is the raw appearance feature extracted from the current frame and $\gamma$ is a **fixed** update rate (e.g. 0.9).
+
+**The flaw:** When a drone passes under a tree or makes a sharp turn, the raw feature $f^t$ becomes noisy and degraded. Because $\gamma$ is static, this corrupted observation gets permanently baked into the template $F^t$. The tracker's "memory" of the target is now polluted — leading to **Identity Switches (IDSw)** when it tries to re-identify the target after the occlusion ends.
+
+This is called **Template Pollution**, and it is the primary cause of identity failure in nadir-view (top-down) aerial tracking.
+
+---
+
+## The Solution: Kinematic-Aware Dynamic Aggregation
+
+Instead of a fixed $\gamma$, DARE-MOT computes **dynamic weights** from the detection confidence scores, and uses a **second-order memory** (looking back two frames instead of one):
+
+$$F^t = \gamma_0 f^t + \gamma_1 F^{t-1} + \gamma_2 F^{t-2} \quad \text{subject to} \quad \sum_{i=0}^{2} \gamma_i = 1$$
+
+The weights $\gamma_0, \gamma_1, \gamma_2$ are computed automatically from the YOLOX bounding box confidence scores $c^t, c^{t-1}, c^{t-2}$:
+
+- **High confidence frame** → $\gamma_0$ is large → memory updates normally
+- **Low confidence frame** (occlusion/blur) → $\gamma_0 \to 0$ → memory freezes, relying on clean historical templates
+
+### Two normalization options (set via `agg_option` in `byte_tracker.py`)
+
+**Option A — L₁ Normalization** (`agg_option = 'A'`, faster):
+$$\gamma_0 = \frac{c^t}{c^t + \beta(c^{t-1} + c^{t-2})}$$
+
+The parameter $\beta$ (default: 4) is the *Inertia of Memory* — it biases the weights toward historical templates. At $\beta=4$ with equal confidences, the current frame contributes only ~11% to the update, making the template highly resistant to a single bad frame.
+
+**Option B — Temperature-Scaled Softmax** (`agg_option = 'B'`, default, more aggressive):
+$$\gamma_i = \frac{\exp(c^{t-i} / \tau)}{\sum_{j=0}^{2} \exp(c^{t-j} / \tau)}$$
+
+With $\tau=0.5$, even a small confidence drop is non-linearly amplified, pushing $\gamma_0$ aggressively toward zero.
+
+### Hard Lock: Kinematic Divergence Trigger
+
+Confidence alone doesn't catch all occlusion events (e.g. a target that partially disappears but still gets a high-confidence detection). DARE-MOT adds a second safety check:
+
+The **Kalman Filter** predicts where the target *should* be geometrically. If the detected bounding box diverges significantly from this prediction (IoU < 0.3), the system declares a kinematic divergence event and applies a hard penalty:
+
+$$c^t_{\text{penalized}} = c^t \times \rho \quad (\rho \to 0)$$
+
+This forces $\gamma_0 \to 0$, completely locking the memory bank.
+
+---
+
+## What Changed from ByteTrack
+
+ByteTrack is a purely IoU-based tracker with no appearance features. DARE-MOT adds three things:
+
+### 1. Dynamic Memory Update (`yolox/tracker/byte_tracker.py`)
+
+**`STrack` class changes:**
+- Added `smooth_history` — a deque of the last 2 **aggregated** templates $F^{t-1}$ and $F^{t-2}$ (not raw features)
+- Added `_calculate_gammas()` — computes dynamic weights from confidence history
+- Added `update_features()` — replaces static EMA with DARE-MOT second-order aggregation
+
+```python
+# Old (ByteTrack standard EMA — not in this repo):
+# smooth_feat = (1 - 0.9) * smooth_feat + 0.9 * new_feature
+
+# New (DARE-MOT):
+F_t = gamma_0 * f_t + gamma_1 * F_t1 + gamma_2 * F_t2
+```
+
+### 2. Kinematic Hard Lock (`BYTETracker.update()`)
+
+Before calling `track.update()` (which would overwrite the Kalman prediction), the predicted bbox is saved. After the update, IoU between prediction and detection is computed. If IoU < 0.3 **or** detection score < 0.4, `update_features()` is not called — the memory stays frozen.
+
+```python
+pred_tlwh = track.tlwh.copy()          # save KF prediction
+track.update(det, self.frame_id)        # update position
+
+# compute IoU between prediction and detection
+kf_iou = compute_iou(pred_tlwh, det.tlwh)
+if det.score >= 0.4 and kf_iou >= 0.3:
+    track.update_features(det.curr_feat, det.score)
+# else: memory stays frozen
+```
+
+### 3. Appearance-Fused Association (`yolox/tracker/matching.py`)
+
+ByteTrack matches detections to tracks using IoU only. DARE-MOT adds appearance (ReID) to the first association pass:
+
+```
+cost = 0.5 × IoU_distance + 0.5 × ReID_distance
+```
+
+ReID features are extracted from each detection crop using **MobileNetV2** (pretrained, 1280-dim, GAP-pooled). The `embedding_distance_safe` function handles tracks without features gracefully (cost = 1.0 fallback to IoU).
+
+The second association pass (low-confidence detections) still uses IoU only — appearance is unreliable at low confidence.
+
+---
+
+## Repository Structure
+
+```
+DARE-MOT/
+├── yolox/
+│   └── tracker/
+│       ├── byte_tracker.py     ← DARE-MOT core (STrack + BYTETracker)
+│       ├── matching.py         ← matching utils + embedding_distance_safe
+│       └── kalman_filter.py    ← unchanged from ByteTrack
+├── tools/
+│   ├── track.py                ← evaluation script
+│   └── mota.py                 ← metric computation
+├── convert_visdrone.py         ← VisDrone → MOTChallenge format
+├── exps/                       ← YOLOX experiment configs
+└── requirements.txt
+```
+
+---
+
+## Datasets
+
+DARE-MOT is evaluated on aerial UAV benchmarks:
+
+- **VisDrone2019-MOT** — primary benchmark. Nadir-view footage with severe occlusions, small targets (<30×30px), high density (100+ objects/frame).
+- **UAVDT** — secondary benchmark. Similar aerial characteristics.
+
+Download and convert VisDrone to MOTChallenge format:
+```bash
+python convert_visdrone.py \
+    --src /path/to/VisDrone/VisDrone2019-MOT-val \
+    --dst /path/to/datasets/visdrone/val
+```
+
+---
 
 ## Installation
-### 1. Installing on the host machine
-Step1. Install ByteTrack.
-```shell
-git clone https://github.com/ifzhang/ByteTrack.git
-cd ByteTrack
-pip3 install -r requirements.txt
-python3 setup.py develop
+
+```bash
+git clone https://github.com/crystalfruit2/DARE-MOT.git
+cd DARE-MOT
+pip install -r requirements.txt
+python setup.py develop
 ```
 
-Step2. Install [pycocotools](https://github.com/cocodataset/cocoapi).
+**Requirements:** Python 3.8+, PyTorch, torchvision, OpenCV  
+**GPU:** CUDA recommended for benchmarks. CPU / MPS (Apple Silicon) works for development.
 
-```shell
-pip3 install cython; pip3 install 'git+https://github.com/cocodataset/cocoapi.git#subdirectory=PythonAPI'
+---
+
+## Running
+
+```bash
+python tools/track.py \
+    --exp_file exps/example/mot/yolox_x_mix_det.py \
+    --ckpt /path/to/model.pth \
+    --path /path/to/dataset \
+    --fp16 --fuse
 ```
 
-Step3. Others
-```shell
-pip3 install cython_bbox
-```
-### 2. Docker build
-```shell
-docker build -t bytetrack:latest .
+---
 
-# Startup sample
-mkdir -p pretrained && \
-mkdir -p YOLOX_outputs && \
-xhost +local: && \
-docker run --gpus all -it --rm \
--v $PWD/pretrained:/workspace/ByteTrack/pretrained \
--v $PWD/datasets:/workspace/ByteTrack/datasets \
--v $PWD/YOLOX_outputs:/workspace/ByteTrack/YOLOX_outputs \
--v /tmp/.X11-unix/:/tmp/.X11-unix:rw \
---device /dev/video0:/dev/video0:mwr \
---net=host \
--e XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR \
--e DISPLAY=$DISPLAY \
---privileged \
-bytetrack:latest
-```
+## Hyperparameters
 
-## Data preparation
+All DARE-MOT hyperparameters are set inside `STrack.__init__()` in `yolox/tracker/byte_tracker.py`:
 
-Download [MOT17](https://motchallenge.net/), [MOT20](https://motchallenge.net/), [CrowdHuman](https://www.crowdhuman.org/), [Cityperson](https://github.com/Zhongdao/Towards-Realtime-MOT/blob/master/DATASET_ZOO.md), [ETHZ](https://github.com/Zhongdao/Towards-Realtime-MOT/blob/master/DATASET_ZOO.md) and put them under <ByteTrack_HOME>/datasets in the following structure:
-```
-datasets
-   |——————mot
-   |        └——————train
-   |        └——————test
-   └——————crowdhuman
-   |         └——————Crowdhuman_train
-   |         └——————Crowdhuman_val
-   |         └——————annotation_train.odgt
-   |         └——————annotation_val.odgt
-   └——————MOT20
-   |        └——————train
-   |        └——————test
-   └——————Cityscapes
-   |        └——————images
-   |        └——————labels_with_ids
-   └——————ETHZ
-            └——————eth01
-            └——————...
-            └——————eth07
-```
+| Parameter | Default | Meaning |
+|---|---|---|
+| `agg_option` | `'B'` | `'A'` = L₁ normalization, `'B'` = Softmax |
+| `beta` | `4.0` | Inertia of Memory (Option A only) |
+| `tau` | `0.5` | Softmax temperature (Option B only) |
+| Score threshold | `0.4` | Min confidence to allow memory update |
+| IoU threshold | `0.3` | Min KF-detection IoU before hard lock |
 
-Then, you need to turn the datasets to COCO format and mix different training data:
+---
 
-```shell
-cd <ByteTrack_HOME>
-python3 tools/convert_mot17_to_coco.py
-python3 tools/convert_mot20_to_coco.py
-python3 tools/convert_crowdhuman_to_coco.py
-python3 tools/convert_cityperson_to_coco.py
-python3 tools/convert_ethz_to_coco.py
-```
+## SOTA Comparison (VisDrone-MOT)
 
-Before mixing different datasets, you need to follow the operations in [mix_xxx.py](https://github.com/ifzhang/ByteTrack/blob/c116dfc746f9ebe07d419caa8acba9b3acfa79a6/tools/mix_data_ablation.py#L6) to create a data folder and link. Finally, you can mix the training data:
+| Model | MOTA ↑ | IDF1 ↑ | IDSw ↓ | Domain |
+|---|---|---|---|---|
+| DeepSORT | 31.4% | 34.2% | High | Ground |
+| FairMOT | 38.6% | 42.1% | Medium | Ground |
+| ByteTrack | 43.5% | 46.8% | Medium | Edge/Aerial |
+| **DARE-MOT** | **TBD** | **TBD** | **TBD** | **Edge/Aerial** |
 
-```shell
-cd <ByteTrack_HOME>
-python3 tools/mix_data_ablation.py
-python3 tools/mix_data_test_mot17.py
-python3 tools/mix_data_test_mot20.py
-```
+---
 
+## Base Framework
 
-## Model zoo
+DARE-MOT is built on top of **ByteTrack** (ECCV 2022).  
+→ [Original ByteTrack README and paper](docs/BYTETRACK_README.md)
 
-### Ablation model
+> Zhang et al., "ByteTrack: Multi-Object Tracking by Associating Every Detection Box," ECCV 2022. [arXiv:2110.06864](https://arxiv.org/abs/2110.06864)
 
-Train on CrowdHuman and MOT17 half train, evaluate on MOT17 half val
+---
 
-| Model    |  MOTA | IDF1 | IDs | FPS |
-|------------|-------|------|------|------|
-|ByteTrack_ablation [[google]](https://drive.google.com/file/d/1iqhM-6V_r1FpOlOzrdP_Ejshgk0DxOob/view?usp=sharing), [[baidu(code:eeo8)]](https://pan.baidu.com/s/1W5eRBnxc4x9V8gm7dgdEYg) | 76.6 | 79.3 | 159 | 29.6 |
+## License
 
-### MOT17 test model
-
-Train on CrowdHuman, MOT17, Cityperson and ETHZ, evaluate on MOT17 train.
-
-* **Standard models**
-
-| Model    |  MOTA | IDF1 | IDs | FPS |
-|------------|-------|------|------|------|
-|bytetrack_x_mot17 [[google]](https://drive.google.com/file/d/1P4mY0Yyd3PPTybgZkjMYhFri88nTmJX5/view?usp=sharing), [[baidu(code:ic0i)]](https://pan.baidu.com/s/1OJKrcQa_JP9zofC6ZtGBpw) | 90.0 | 83.3 | 422 | 29.6 |
-|bytetrack_l_mot17 [[google]](https://drive.google.com/file/d/1XwfUuCBF4IgWBWK2H7oOhQgEj9Mrb3rz/view?usp=sharing), [[baidu(code:1cml)]](https://pan.baidu.com/s/1242adimKM6TYdeLU2qnuRA) | 88.7 | 80.7 | 460 | 43.7 |
-|bytetrack_m_mot17 [[google]](https://drive.google.com/file/d/11Zb0NN_Uu7JwUd9e6Nk8o2_EUfxWqsun/view?usp=sharing), [[baidu(code:u3m4)]](https://pan.baidu.com/s/1fKemO1uZfvNSLzJfURO4TQ) | 87.0 | 80.1 | 477 | 54.1 |
-|bytetrack_s_mot17 [[google]](https://drive.google.com/file/d/1uSmhXzyV1Zvb4TJJCzpsZOIcw7CCJLxj/view?usp=sharing), [[baidu(code:qflm)]](https://pan.baidu.com/s/1PiP1kQfgxAIrnGUbFP6Wfg) | 79.2 | 74.3 | 533 | 64.5 |
-
-* **Light models**
-
-| Model    |  MOTA | IDF1 | IDs | Params(M) | FLOPs(G) |
-|------------|-------|------|------|------|-------|
-|bytetrack_nano_mot17 [[google]](https://drive.google.com/file/d/1AoN2AxzVwOLM0gJ15bcwqZUpFjlDV1dX/view?usp=sharing), [[baidu(code:1ub8)]](https://pan.baidu.com/s/1dMxqBPP7lFNRZ3kFgDmWdw) | 69.0 | 66.3 | 531 | 0.90 | 3.99 |
-|bytetrack_tiny_mot17 [[google]](https://drive.google.com/file/d/1LFAl14sql2Q5Y9aNFsX_OqsnIzUD_1ju/view?usp=sharing), [[baidu(code:cr8i)]](https://pan.baidu.com/s/1jgIqisPSDw98HJh8hqhM5w) | 77.1 | 71.5 | 519 | 5.03 | 24.45 |
-
-
-
-### MOT20 test model
-
-Train on CrowdHuman and MOT20, evaluate on MOT20 train.
-
-
-| Model    |  MOTA | IDF1 | IDs | FPS |
-|------------|-------|------|------|------|
-|bytetrack_x_mot20 [[google]](https://drive.google.com/file/d/1HX2_JpMOjOIj1Z9rJjoet9XNy_cCAs5U/view?usp=sharing), [[baidu(code:3apd)]](https://pan.baidu.com/s/1bowJJj0bAnbhEQ3_6_Am0A) | 93.4 | 89.3 | 1057 | 17.5 |
-
-
-## Training
-
-The COCO pretrained YOLOX model can be downloaded from their [model zoo](https://github.com/Megvii-BaseDetection/YOLOX/tree/0.1.0). After downloading the pretrained models, you can put them under <ByteTrack_HOME>/pretrained.
-
-* **Train ablation model (MOT17 half train and CrowdHuman)**
-
-```shell
-cd <ByteTrack_HOME>
-python3 tools/train.py -f exps/example/mot/yolox_x_ablation.py -d 8 -b 48 --fp16 -o -c pretrained/yolox_x.pth
-```
-
-* **Train MOT17 test model (MOT17 train, CrowdHuman, Cityperson and ETHZ)**
-
-```shell
-cd <ByteTrack_HOME>
-python3 tools/train.py -f exps/example/mot/yolox_x_mix_det.py -d 8 -b 48 --fp16 -o -c pretrained/yolox_x.pth
-```
-
-* **Train MOT20 test model (MOT20 train, CrowdHuman)**
-
-For MOT20, you need to clip the bounding boxes inside the image.
-
-Add clip operation in [line 134-135 in data_augment.py](https://github.com/ifzhang/ByteTrack/blob/72cd6dd24083c337a9177e484b12bb2b5b3069a6/yolox/data/data_augment.py#L134), [line 122-125 in mosaicdetection.py](https://github.com/ifzhang/ByteTrack/blob/72cd6dd24083c337a9177e484b12bb2b5b3069a6/yolox/data/datasets/mosaicdetection.py#L122), [line 217-225 in mosaicdetection.py](https://github.com/ifzhang/ByteTrack/blob/72cd6dd24083c337a9177e484b12bb2b5b3069a6/yolox/data/datasets/mosaicdetection.py#L217), [line 115-118 in boxes.py](https://github.com/ifzhang/ByteTrack/blob/72cd6dd24083c337a9177e484b12bb2b5b3069a6/yolox/utils/boxes.py#L115).
-
-```shell
-cd <ByteTrack_HOME>
-python3 tools/train.py -f exps/example/mot/yolox_x_mix_mot20_ch.py -d 8 -b 48 --fp16 -o -c pretrained/yolox_x.pth
-```
-
-* **Train custom dataset**
-
-First, you need to prepare your dataset in COCO format. You can refer to [MOT-to-COCO](https://github.com/ifzhang/ByteTrack/blob/main/tools/convert_mot17_to_coco.py) or [CrowdHuman-to-COCO](https://github.com/ifzhang/ByteTrack/blob/main/tools/convert_crowdhuman_to_coco.py). Then, you need to create a Exp file for your dataset. You can refer to the [CrowdHuman](https://github.com/ifzhang/ByteTrack/blob/main/exps/example/mot/yolox_x_ch.py) training Exp file. Don't forget to modify get_data_loader() and get_eval_loader in your Exp file. Finally, you can train bytetrack on your dataset by running:
-
-```shell
-cd <ByteTrack_HOME>
-python3 tools/train.py -f exps/example/mot/your_exp_file.py -d 8 -b 48 --fp16 -o -c pretrained/yolox_x.pth
-```
-
-
-## Tracking
-
-* **Evaluation on MOT17 half val**
-
-Run ByteTrack:
-
-```shell
-cd <ByteTrack_HOME>
-python3 tools/track.py -f exps/example/mot/yolox_x_ablation.py -c pretrained/bytetrack_ablation.pth.tar -b 1 -d 1 --fp16 --fuse
-```
-You can get 76.6 MOTA using our pretrained model.
-
-Run other trackers:
-```shell
-python3 tools/track_sort.py -f exps/example/mot/yolox_x_ablation.py -c pretrained/bytetrack_ablation.pth.tar -b 1 -d 1 --fp16 --fuse
-python3 tools/track_deepsort.py -f exps/example/mot/yolox_x_ablation.py -c pretrained/bytetrack_ablation.pth.tar -b 1 -d 1 --fp16 --fuse
-python3 tools/track_motdt.py -f exps/example/mot/yolox_x_ablation.py -c pretrained/bytetrack_ablation.pth.tar -b 1 -d 1 --fp16 --fuse
-```
-
-* **Test on MOT17**
-
-Run ByteTrack:
-
-```shell
-cd <ByteTrack_HOME>
-python3 tools/track.py -f exps/example/mot/yolox_x_mix_det.py -c pretrained/bytetrack_x_mot17.pth.tar -b 1 -d 1 --fp16 --fuse
-python3 tools/interpolation.py
-```
-Submit the txt files to [MOTChallenge](https://motchallenge.net/) website and you can get 79+ MOTA (For 80+ MOTA, you need to carefully tune the test image size and high score detection threshold of each sequence).
-
-* **Test on MOT20**
-
-We use the input size 1600 x 896 for MOT20-04, MOT20-07 and 1920 x 736 for MOT20-06, MOT20-08. You can edit it in [yolox_x_mix_mot20_ch.py](https://github.com/ifzhang/ByteTrack/blob/main/exps/example/mot/yolox_x_mix_mot20_ch.py)
-
-Run ByteTrack:
-
-```shell
-cd <ByteTrack_HOME>
-python3 tools/track.py -f exps/example/mot/yolox_x_mix_mot20_ch.py -c pretrained/bytetrack_x_mot20.pth.tar -b 1 -d 1 --fp16 --fuse --match_thresh 0.7 --mot20
-python3 tools/interpolation.py
-```
-Submit the txt files to [MOTChallenge](https://motchallenge.net/) website and you can get 77+ MOTA (For higher MOTA, you need to carefully tune the test image size and high score detection threshold of each sequence).
-
-## Applying BYTE to other trackers
-
-See [tutorials](https://github.com/ifzhang/ByteTrack/tree/main/tutorials).
-
-## Combining BYTE with other detectors
-
-Suppose you have already got the detection results 'dets' (x1, y1, x2, y2, score) from other detectors, you can simply pass the detection results to BYTETracker (you need to first modify some post-processing code according to the format of your detection results in [byte_tracker.py](https://github.com/ifzhang/ByteTrack/blob/main/yolox/tracker/byte_tracker.py)):
-
-```
-from yolox.tracker.byte_tracker import BYTETracker
-tracker = BYTETracker(args)
-for image in images:
-   dets = detector(image)
-   online_targets = tracker.update(dets, info_imgs, img_size)
-```
-
-You can get the tracking results in each frame from 'online_targets'. You can refer to [mot_evaluators.py](https://github.com/ifzhang/ByteTrack/blob/main/yolox/evaluators/mot_evaluator.py) to pass the detection results to BYTETracker.
-
-## Demo
-
-<img src="assets/palace_demo.gif" width="600"/>
-
-```shell
-cd <ByteTrack_HOME>
-python3 tools/demo_track.py video -f exps/example/mot/yolox_x_mix_det.py -c pretrained/bytetrack_x_mot17.pth.tar --fp16 --fuse --save_result
-```
-
-## Deploy
-
-1.  [ONNX export and ONNXRuntime](./deploy/ONNXRuntime)
-2.  [TensorRT in Python](./deploy/TensorRT/python)
-3.  [TensorRT in C++](./deploy/TensorRT/cpp)
-4.  [ncnn in C++](./deploy/ncnn/cpp)
-5.  [Deepstream](./deploy/DeepStream)
-
-## Citation
-
-```
-@article{zhang2022bytetrack,
-  title={ByteTrack: Multi-Object Tracking by Associating Every Detection Box},
-  author={Zhang, Yifu and Sun, Peize and Jiang, Yi and Yu, Dongdong and Weng, Fucheng and Yuan, Zehuan and Luo, Ping and Liu, Wenyu and Wang, Xinggang},
-  booktitle={Proceedings of the European Conference on Computer Vision (ECCV)},
-  year={2022}
-}
-```
-
-## Acknowledgement
-
-A large part of the code is borrowed from [YOLOX](https://github.com/Megvii-BaseDetection/YOLOX), [FairMOT](https://github.com/ifzhang/FairMOT), [TransTrack](https://github.com/PeizeSun/TransTrack) and [JDE-Cpp](https://github.com/samylee/Towards-Realtime-MOT-Cpp). Many thanks for their wonderful works.
+Apache 2.0 — see [LICENSE](LICENSE)
