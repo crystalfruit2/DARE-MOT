@@ -123,5 +123,11 @@ def convert_mot_to_coco(data_root, split='test'):
           f"{len(out['annotations'])} annotations -> {out_path}")
 
 if __name__ == '__main__':
-    DATA_ROOT = r'C:\Users\User\Desktop\projects\ByteTrack\datasets\mot'
-    convert_mot_to_coco(DATA_ROOT, split='test-dev')
+    import sys
+    if len(sys.argv) >= 3:
+        DATA_ROOT = sys.argv[1]
+        split = sys.argv[2]
+    else:
+        DATA_ROOT = r'C:\Users\User\Desktop\projects\ByteTrack\datasets\mot'
+        split = 'test-dev'
+    convert_mot_to_coco(DATA_ROOT, split=split)
