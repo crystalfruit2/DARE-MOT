@@ -192,7 +192,11 @@ def main(exp, args, num_gpu):
         loc = device
         ckpt = torch.load(ckpt_file, map_location=loc)
         # load the model state dict
-        model.load_state_dict(ckpt["model"])
+        missing, unexpected = model.load_state_dict(ckpt["model"], strict=False)
+        if unexpected:
+            logger.warning(f"Skipped {len(unexpected)} unexpected keys (e.g. JDE ReID heads): {unexpected[:3]}...")
+        if missing:
+            logger.warning(f"Missing {len(missing)} keys in checkpoint: {missing[:3]}...")
         logger.info("loaded checkpoint done.")
 
     if is_distributed and torch.cuda.is_available():
