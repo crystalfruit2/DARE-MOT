@@ -140,3 +140,6 @@ events.out.tfevents*
 pretrained
 YOLOX_outputs
 /datasets
+
+# Research notes live in the second brain vault, not the repo
+notes/

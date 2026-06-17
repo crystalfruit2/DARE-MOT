@@ -34,8 +34,8 @@ class Exp(MyExp):
         self.test_conf = 0.001
         self.nmsthre = 0.7
 
-        # Windows: multiprocessing DataLoader workers can deadlock; use 0
-        self.data_num_workers = 0
+        # 2 workers on Windows (spawn method) — 0 caused main-thread hang during mosaic loading
+        self.data_num_workers = 2
 
         # Training data: VisDrone val in MOT format with generated train.json
         self.train_data_dir = r"C:\Users\User\Desktop\projects\ByteTrack\datasets\VisDrone_MOT_Format\VisDrone2019-MOT-val"
