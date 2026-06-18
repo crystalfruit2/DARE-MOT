@@ -21,15 +21,14 @@ class Exp(MyExp):
         self.test_size = (800, 1440)
         self.random_size = (18, 32)
 
-        # Fine-tuning schedule: short run from MOT17 pretrained weights
         self.max_epoch = 20
-        self.no_aug_epochs = 4
+        self.no_aug_epochs = 0   # 0 = skip no-aug DataLoader rebuild (avoids Windows spawn deadlock)
         self.warmup_epochs = 1
         self.print_interval = 20
         self.eval_interval = 5
 
-        # Lower LR for fine-tuning (1/10th of default)
-        self.basic_lr_per_img = 0.001 / 64.0 / 10.0
+        # Standard fine-tuning LR — previous 1/10th run produced localization failure
+        self.basic_lr_per_img = 0.001 / 64.0
 
         self.test_conf = 0.001
         self.nmsthre = 0.7
