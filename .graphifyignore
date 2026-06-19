@@ -1,0 +1,39 @@
+# Generated model outputs (3 GB — must exclude)
+YOLOX_outputs/
+
+# Build artifacts
+__pycache__/
+*.pyc
+build/
+*.egg-info/
+
+# Media
+assets/
+videos/
+
+# Logs
+*.log
+
+# Research notes
+notes/
+
+# Datasets (large, not code)
+datasets/
+
+# Tutorial reference implementations — 8 other trackers, adds noise to queries
+tutorials/
+
+# Graph itself
+graphify-out/
+
+# Docs and images — exclude for code-only AST graph (no API key needed)
+# Add ANTHROPIC_API_KEY to env to include these in future rebuilds
+*.md
+*.txt
+*.rst
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+deploy/

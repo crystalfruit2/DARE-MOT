@@ -119,15 +119,17 @@ def embedding_distance_safe(tracks, detections, metric='cosine'):
     if cost_matrix.size == 0:
         return cost_matrix
 
-    for i, track in enumerate(tracks):
-        if track.smooth_feat is None:
-            continue
-        for j, det in enumerate(detections):
-            if det.curr_feat is None:
-                continue
-            tf = track.smooth_feat.reshape(1, -1).astype(np.float64)
-            df = det.curr_feat.reshape(1, -1).astype(np.float64)
-            cost_matrix[i, j] = max(0.0, cdist(tf, df, metric)[0, 0])
+    track_indices = [i for i, t in enumerate(tracks) if t.smooth_feat is not None]
+    det_indices   = [j for j, d in enumerate(detections) if d.curr_feat is not None]
+
+    if not track_indices or not det_indices:
+        return cost_matrix
+
+    track_feats = np.asarray([tracks[i].smooth_feat for i in track_indices], dtype=np.float64)
+    det_feats   = np.asarray([detections[j].curr_feat for j in det_indices], dtype=np.float64)
+
+    sub = np.maximum(0.0, cdist(track_feats, det_feats, metric))
+    cost_matrix[np.ix_(track_indices, det_indices)] = sub
 
     return cost_matrix
 

@@ -143,3 +143,11 @@ YOLOX_outputs
 
 # Research notes live in the second brain vault, not the repo
 notes/
+
+# Graphify knowledge graph — generated artifacts, rebuild with: graphify . --no-viz
+graphify-out/
+
+# Diagnostic overlay images — regenerable via viz_check.py / train_viz_check.py / diag_combined.py
+viz_out/
+viz_out_train/
+viz_out_train_pred/

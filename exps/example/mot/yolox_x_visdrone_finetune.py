@@ -14,18 +14,18 @@ class Exp(MyExp):
         self.width = 1.25
         self.exp_name = os.path.split(os.path.realpath(__file__))[1].split(".")[0]
 
-        self.train_ann = "train.json"
-        self.val_ann = "test-dev.json"
+        self.train_ann = "train6.json"   # clean split: 6 pedestrian sequences
+        self.val_ann = "val1.json"       # held-out: uav0000339_00001_v
 
         self.input_size = (800, 1440)
         self.test_size = (800, 1440)
         self.random_size = (18, 32)
 
-        self.max_epoch = 20
+        self.max_epoch = 10
         self.no_aug_epochs = 0   # 0 = skip no-aug DataLoader rebuild (avoids Windows spawn deadlock)
         self.warmup_epochs = 1
         self.print_interval = 20
-        self.eval_interval = 5
+        self.eval_interval = 2   # held-out val1 is small (~275 imgs); eval often to watch AP
 
         # Standard fine-tuning LR — previous 1/10th run produced localization failure
         self.basic_lr_per_img = 0.001 / 64.0
@@ -39,8 +39,8 @@ class Exp(MyExp):
         # Training data: VisDrone val in MOT format with generated train.json
         self.train_data_dir = r"C:\Users\User\Desktop\projects\ByteTrack\datasets\VisDrone_MOT_Format\VisDrone2019-MOT-val"
 
-        # Eval data: same mot directory used before (has uav0000009_03358_v + test-dev.json)
-        self.data_dir = r"C:\Users\User\Desktop\projects\ByteTrack\datasets\mot"
+        # Eval data: held-out pedestrian sequence (val1.json) — SAME dir as train (clean split)
+        self.data_dir = r"C:\Users\User\Desktop\projects\ByteTrack\datasets\VisDrone_MOT_Format\VisDrone2019-MOT-val"
 
     def get_data_loader(self, batch_size, is_distributed, no_aug=False):
         from yolox.data import (
