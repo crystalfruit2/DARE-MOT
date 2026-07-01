@@ -151,3 +151,6 @@ graphify-out/
 viz_out/
 viz_out_train/
 viz_out_train_pred/
+
+# Fairness detector dump — generated output, regenerable via _fairness_detdump.py
+_fairness_detdump.out
