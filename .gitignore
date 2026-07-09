@@ -154,3 +154,17 @@ viz_out_train_pred/
 
 # Fairness detector dump — generated output, regenerable via _fairness_detdump.py
 _fairness_detdump.out
+
+# ReID feature diagnostic dump — generated output, regenerable via _reid_diag.py
+_reid_diag.out
+
+# Ablation sweep raw tracker output — generated, regenerable via _run_ablation.ps1 /
+# tools/track.py; the numeric results are recorded in the vault (paper Table IV,
+# DARE-MOT-paper-changelog.md), not tracked here.
+_ablation/
+_ablation_multiseq/
+
+# TrackEval HOTA/AssA scratch harness — GT/tracker data copies are regenerable from
+# the ablation results and the shared dataset; keep run_hota.py (the actual script).
+_trackeval/gt/
+_trackeval/trackers/

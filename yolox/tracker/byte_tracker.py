@@ -40,10 +40,11 @@ class STrack(BaseTrack):
             self.scores.append(score)
             self.curr_feat = feat_norm
             
-        # Hyperparameters (Set these based on your paper's specs)
-        self.agg_option = 'B'  # 'A' for L1 Bias, 'B' for Softmax
-        self.beta = 4.0        # Inertia of Memory (Option A)
-        self.tau = 0.5         # Softmax Temperature (Option B)
+        # Hyperparameters — env-overridable for ablation; defaults reproduce the validated config.
+        self.agg_option = os.environ.get('DARE_AGG', 'B')          # 'A' L1 Bias, 'B' Softmax
+        self.beta = float(os.environ.get('DARE_BETA', '4.0'))      # Inertia of Memory (Option A)
+        self.tau = float(os.environ.get('DARE_TAU', '0.5'))        # Softmax Temperature (Option B)
+        self.static_ema = float(os.environ.get('DARE_STATIC_EMA', '-1'))  # >=0: static-EMA control gamma
     def _calculate_gammas(self):
         """
         Calculates dynamic weights based on the historical confidences.
@@ -86,7 +87,14 @@ class STrack(BaseTrack):
         self.scores.append(new_score)
         f_t = new_feature / (np.linalg.norm(new_feature) + 1e-6)  # normalize raw feature
 
-        if len(self.smooth_history) < 2:
+        if self.static_ema >= 0.0:
+            # Static-EMA control (ablation): F^t = g*F^{t-1} + (1-g)*f^t
+            if self.smooth_feat is None:
+                new_smooth = f_t.copy()
+            else:
+                g = self.static_ema
+                new_smooth = g * self.smooth_feat + (1.0 - g) * f_t
+        elif len(self.smooth_history) < 2:
             # Warmup: not enough history yet, use raw feature directly
             new_smooth = f_t.copy()
         else:
@@ -240,6 +248,10 @@ class BYTETracker(object):
         self.max_time_lost = self.buffer_size
         self.kalman_filter = KalmanFilter()
 
+        # Ablation knobs (env-overridable; defaults reproduce validated behavior)
+        self.lock_on = os.environ.get('DARE_LOCK', '1') == '1'     # kinematic/confidence hard lock
+        self.reid_lambda = float(os.environ.get('DARE_LAMBDA', '0.5'))  # appearance weight in fused cost
+
         # --- LIGHTWEIGHT FEATURE EXTRACTOR ---
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.extractor = mobilenet_v2(pretrained=True).features.to(self.device).eval()
@@ -326,7 +338,7 @@ class BYTETracker(object):
         # embedding_distance_safe falls back to cost=1.0 for any track/det without features,
         # so the fused matrix degrades gracefully to IoU-only for those pairs.
         reid_dists = matching.embedding_distance_safe(strack_pool, detections)
-        dists = 0.5 * iou_dists + 0.5 * reid_dists
+        dists = (1.0 - self.reid_lambda) * iou_dists + self.reid_lambda * reid_dists
 
         matches, u_track, u_detection = matching.linear_assignment(dists, thresh=self.args.match_thresh)
 
@@ -349,7 +361,7 @@ class BYTETracker(object):
                 kf_iou = inter / (union + 1e-6)
                 is_kinematic_divergence = kf_iou < 0.3  # tau_shape threshold
 
-                if det.score >= 0.4 and not is_kinematic_divergence and det.curr_feat is not None:
+                if det.curr_feat is not None and (not self.lock_on or (det.score >= 0.4 and not is_kinematic_divergence)):
                     track.update_features(det.curr_feat, det.score)
                 activated_starcks.append(track)
             else:
@@ -403,7 +415,7 @@ class BYTETracker(object):
                 kf_iou = inter / (union + 1e-6)
                 is_kinematic_divergence = kf_iou < 0.3  # tau_shape threshold
 
-                if det.score >= 0.4 and not is_kinematic_divergence and det.curr_feat is not None:
+                if det.curr_feat is not None and (not self.lock_on or (det.score >= 0.4 and not is_kinematic_divergence)):
                     track.update_features(det.curr_feat, det.score)
                 activated_starcks.append(track)
             else:
