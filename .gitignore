@@ -162,6 +162,9 @@ _reid_diag.out
 # tools/track.py; the numeric results are recorded in the vault (paper Table IV,
 # DARE-MOT-paper-changelog.md), not tracked here.
 _ablation/
+
+# ID-switch review crops — generated diagnostic output, regenerable via _idswitch_extract.py
+_idswitch_review/
 _ablation_multiseq/
 
 # TrackEval HOTA/AssA scratch harness — GT/tracker data copies are regenerable from
