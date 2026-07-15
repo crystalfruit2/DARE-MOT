@@ -10,7 +10,9 @@ from torchvision.models import mobilenet_v2
 from collections import defaultdict
 
 VAL = r"C:\Users\User\Desktop\projects\ByteTrack\datasets\VisDrone_MOT_Format\VisDrone2019-MOT-val"
-SEQS = ["uav0000339_00001_v", "uav0000305_00000_v", "uav0000086_00000_v"]
+SEQS = ["uav0000086_00000_v", "uav0000117_02622_v", "uav0000137_00458_v",
+        "uav0000182_00000_v", "uav0000268_05773_v", "uav0000305_00000_v",
+        "uav0000339_00001_v"]
 MAX_IDS, MAX_CROPS = 60, 8
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
