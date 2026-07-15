@@ -105,6 +105,9 @@ class STrack(BaseTrack):
             feats_array = np.array([F_t2, F_t1, f_t])
             # gammas = [gamma_2, gamma_1, gamma_0] — ordered oldest to newest
             new_smooth = np.average(feats_array, axis=0, weights=gammas)
+            if getattr(STrack, 'dare_diag', False):
+                # how far the dynamic gate's newest-frame weight deviates from static EMA's implicit 0.9
+                STrack.gamma_devs.append(abs(float(gammas[-1]) - 0.9))
 
         # Re-normalize to keep on unit hypersphere
         norm = np.linalg.norm(new_smooth)
@@ -252,6 +255,12 @@ class BYTETracker(object):
         self.lock_on = os.environ.get('DARE_LOCK', '1') == '1'     # kinematic/confidence hard lock
         self.reid_lambda = float(os.environ.get('DARE_LAMBDA', '0.5'))  # appearance weight in fused cost
 
+        # Phase 0.2 gate-activity diagnostics (results-improvement-plan-2026-07-13) — DARE_DIAG=1 to enable
+        self.dare_diag = os.environ.get('DARE_DIAG', '0') == '1'
+        self.lock_fires = 0
+        STrack.dare_diag = self.dare_diag
+        STrack.gamma_devs = []
+
         # --- LIGHTWEIGHT FEATURE EXTRACTOR ---
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.extractor = mobilenet_v2(pretrained=True).features.to(self.device).eval()
@@ -361,8 +370,12 @@ class BYTETracker(object):
                 kf_iou = inter / (union + 1e-6)
                 is_kinematic_divergence = kf_iou < 0.3  # tau_shape threshold
 
-                if det.curr_feat is not None and (not self.lock_on or (det.score >= 0.4 and not is_kinematic_divergence)):
-                    track.update_features(det.curr_feat, det.score)
+                if det.curr_feat is not None:
+                    should_update = not self.lock_on or (det.score >= 0.4 and not is_kinematic_divergence)
+                    if should_update:
+                        track.update_features(det.curr_feat, det.score)
+                    elif self.dare_diag:
+                        self.lock_fires += 1
                 activated_starcks.append(track)
             else:
                 track.re_activate(det, self.frame_id, new_id=False)
@@ -415,8 +428,12 @@ class BYTETracker(object):
                 kf_iou = inter / (union + 1e-6)
                 is_kinematic_divergence = kf_iou < 0.3  # tau_shape threshold
 
-                if det.curr_feat is not None and (not self.lock_on or (det.score >= 0.4 and not is_kinematic_divergence)):
-                    track.update_features(det.curr_feat, det.score)
+                if det.curr_feat is not None:
+                    should_update = not self.lock_on or (det.score >= 0.4 and not is_kinematic_divergence)
+                    if should_update:
+                        track.update_features(det.curr_feat, det.score)
+                    elif self.dare_diag:
+                        self.lock_fires += 1
                 activated_starcks.append(track)
             else:
                 track.re_activate(det, self.frame_id, new_id=False)
@@ -469,6 +486,16 @@ class BYTETracker(object):
         output_stracks = [track for track in self.tracked_stracks if track.is_activated]
 
         return output_stracks
+
+    def print_diag_summary(self, seq_name=None):
+        """Phase 0.2 (results-improvement-plan-2026-07-13): print gate-activity counters
+        accumulated over this tracker's lifetime. No-op unless DARE_DIAG=1."""
+        if not self.dare_diag:
+            return
+        devs = STrack.gamma_devs
+        mean_dev = float(np.mean(devs)) if devs else 0.0
+        print(f"[DARE_DIAG] seq={seq_name or '?'} lock_fires={self.lock_fires} "
+              f"gamma_dev_mean={mean_dev:.4f} (n={len(devs)})")
 
 
 def joint_stracks(tlista, tlistb):

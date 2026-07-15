@@ -18,6 +18,7 @@ from yolox.deepsort_tracker.deepsort import DeepSort
 from yolox.motdt_tracker.motdt_tracker import OnlineTracker
 
 import contextlib
+import cv2
 import io
 import os
 import itertools
@@ -159,11 +160,12 @@ class MOTEvaluator:
                 if video_name not in video_names:
                     video_names[video_id] = video_name
                 if frame_id == 1:
-                    tracker = BYTETracker(self.args)
                     if len(results) != 0:
+                        tracker.print_diag_summary(video_names[video_id - 1])
                         result_filename = os.path.join(result_folder, '{}.txt'.format(video_names[video_id - 1]))
                         write_results(result_filename, results)
                         results = []
+                    tracker = BYTETracker(self.args)
 
                 imgs = imgs.type(tensor_type)
 
@@ -187,7 +189,17 @@ class MOTEvaluator:
 
             # run tracking
             if outputs[0] is not None:
-                online_targets = tracker.update(outputs[0], info_imgs, self.img_size)
+                # Load the raw (un-preprocessed) frame so BYTETracker can extract real appearance
+                # crops — MOTDataset discards it after preproc, leaving img_info[0] as a plain height
+                # int, so the tracker's `isinstance(img_info[0], np.ndarray)` raw_frame check was
+                # silently always False and the appearance branch never ran (see benchmark-ablation-
+                # findings-2026-07-01.md correction, 2026-07-15).
+                dataset = self.dataloader.dataset
+                img_path = os.path.join(dataset.data_dir, dataset.name, img_file_name[0])
+                raw_img = cv2.imread(img_path)
+                tracker_info_imgs = [raw_img, info_imgs[1], info_imgs[2], info_imgs[3], info_imgs[4]]
+
+                online_targets = tracker.update(outputs[0], tracker_info_imgs, self.img_size)
                 online_tlwhs = []
                 online_ids = []
                 online_scores = []
@@ -207,6 +219,7 @@ class MOTEvaluator:
                 track_time += track_end - infer_end
             
             if cur_iter == len(self.dataloader) - 1:
+                tracker.print_diag_summary(video_names[video_id])
                 result_filename = os.path.join(result_folder, '{}.txt'.format(video_names[video_id]))
                 write_results(result_filename, results)
 
