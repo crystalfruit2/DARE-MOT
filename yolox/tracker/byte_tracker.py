@@ -255,6 +255,13 @@ class BYTETracker(object):
         self.lock_on = os.environ.get('DARE_LOCK', '1') == '1'     # kinematic/confidence hard lock
         self.reid_lambda = float(os.environ.get('DARE_LAMBDA', '0.5'))  # appearance weight in fused cost
 
+        # Fix #1 (foreground-focused appearance) & Fix #3 (re-association age cap) — meeting-brief-2026-07-16.
+        # All default to reproduce the current real-appearance baseline exactly (no change when unset).
+        self.crop_shrink = float(os.environ.get('DARE_CROP_SHRINK', '0.0'))  # shrink box each side toward center before ReID crop (fraction 0..0.4)
+        self.pool_mode = os.environ.get('DARE_POOL', 'mean')                 # 'mean' (uniform GAP) | 'center' (Gaussian center-weighted pooling)
+        self.pool_sigma = float(os.environ.get('DARE_POOL_SIGMA', '0.5'))    # center-pool Gaussian sigma as fraction of half-size
+        self.reassoc_max = int(os.environ.get('DARE_REASSOC_MAX', '-1'))     # cap lost-track re-association age in frames; -1 = use max_time_lost
+
         # Phase 0.2 gate-activity diagnostics (results-improvement-plan-2026-07-13) — DARE_DIAG=1 to enable
         self.dare_diag = os.environ.get('DARE_DIAG', '0') == '1'
         self.lock_fires = 0
@@ -269,6 +276,53 @@ class BYTETracker(object):
             T.Resize((128, 64)),
             T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
+
+    def _pool(self, fmap):
+        """Pool a [1, C, H, W] feature map to [C].
+        Default 'mean' is uniform global-average-pool (bit-identical to the old
+        `.mean([2,3]).squeeze()`). 'center' applies a separable Gaussian weight
+        centered on the map so the target (usually box-centered) dominates and
+        peripheral background (barriers, adjacent bodies) is down-weighted."""
+        if self.pool_mode == 'center':
+            _, _, H, W = fmap.shape
+            ys = torch.arange(H, device=fmap.device, dtype=torch.float32)
+            xs = torch.arange(W, device=fmap.device, dtype=torch.float32)
+            cy, cx = (H - 1) / 2.0, (W - 1) / 2.0
+            sy = max(self.pool_sigma * (H / 2.0), 1e-3)
+            sx = max(self.pool_sigma * (W / 2.0), 1e-3)
+            wy = torch.exp(-0.5 * ((ys - cy) / sy) ** 2)
+            wx = torch.exp(-0.5 * ((xs - cx) / sx) ** 2)
+            w = wy[:, None] * wx[None, :]           # [H, W]
+            w = w / (w.sum() + 1e-6)
+            feat = (fmap[0] * w).sum(dim=(1, 2))    # [C]
+            return feat.cpu().numpy()
+        return fmap.mean([2, 3]).squeeze().cpu().numpy()
+
+    def _extract_features(self, detections, raw_frame):
+        """Extract a ReID feature per detection from the raw frame.
+        With DARE_CROP_SHRINK>0 the box is shrunk toward its center before
+        cropping (cuts peripheral background before it enters the CNN);
+        pooling is governed by DARE_POOL. Behavior is bit-identical to the
+        old inline block when both knobs are at their defaults."""
+        H_img, W_img = raw_frame.shape[:2]
+        for det in detections:
+            x, y, w, h = det.tlwh
+            if self.crop_shrink > 0.0:
+                dx, dy = w * self.crop_shrink, h * self.crop_shrink
+                x, y, w, h = x + dx, y + dy, w - 2 * dx, h - 2 * dy
+            x, y, w, h = int(x), int(y), int(w), int(h)
+            x1, y1 = max(0, x), max(0, y)
+            x2, y2 = min(W_img, x + w), min(H_img, y + h)
+            crop = raw_frame[y1:y2, x1:x2]
+            if crop.size > 0:
+                if crop.ndim == 3 and crop.shape[2] == 3:
+                    crop = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+                crop_t = self.transform(crop).unsqueeze(0).to(self.device)
+                with torch.no_grad():
+                    fmap = self.extractor(crop_t)
+                det.curr_feat = self._pool(fmap)
+            else:
+                det.curr_feat = np.zeros(1280, dtype=np.float32)
 
     def update(self, output_results, img_info, img_size):
         self.frame_id += 1
@@ -310,21 +364,7 @@ class BYTETracker(object):
             detections = []
 
         if raw_frame is not None and len(detections) > 0:
-            for det in detections:
-                tlwh = det.tlwh
-                x, y, w, h = map(int, tlwh)
-                x1, y1 = max(0, x), max(0, y)
-                x2, y2 = min(raw_frame.shape[1], x + w), min(raw_frame.shape[0], y + h)
-                crop = raw_frame[y1:y2, x1:x2]
-                if crop.size > 0:
-                    if crop.ndim == 3 and crop.shape[2] == 3:
-                        crop = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
-                    crop_t = self.transform(crop).unsqueeze(0).to(self.device)
-                    with torch.no_grad():
-                        feat = self.extractor(crop_t).mean([2, 3]).squeeze().cpu().numpy()
-                    det.curr_feat = feat
-                else:
-                    det.curr_feat = np.zeros(1280, dtype=np.float32)
+            self._extract_features(detections, raw_frame)
 
         ''' Add newly detected tracklets to tracked_stracks'''
         unconfirmed = []
@@ -336,7 +376,15 @@ class BYTETracker(object):
                 tracked_stracks.append(track)
 
         ''' Step 2: First association, with high score detection boxes'''
-        strack_pool = joint_stracks(tracked_stracks, self.lost_stracks)
+        # Fix #3: cap how stale a lost track may be to remain re-associable. Beyond
+        # DARE_REASSOC_MAX frames it's excluded from matching (still removed on the
+        # normal max_time_lost schedule). -1 disables the cap (== old behavior).
+        if self.reassoc_max >= 0:
+            eligible_lost = [t for t in self.lost_stracks
+                             if self.frame_id - t.end_frame <= self.reassoc_max]
+        else:
+            eligible_lost = self.lost_stracks
+        strack_pool = joint_stracks(tracked_stracks, eligible_lost)
         STrack.multi_predict(strack_pool)
 
         iou_dists = matching.iou_distance(strack_pool, detections)
@@ -391,21 +439,7 @@ class BYTETracker(object):
             detections_second = []
 
         if raw_frame is not None and len(detections_second) > 0:
-            for det in detections_second:
-                tlwh = det.tlwh
-                x, y, w, h = map(int, tlwh)
-                x1, y1 = max(0, x), max(0, y)
-                x2, y2 = min(raw_frame.shape[1], x + w), min(raw_frame.shape[0], y + h)
-                crop = raw_frame[y1:y2, x1:x2]
-                if crop.size > 0:
-                    if crop.ndim == 3 and crop.shape[2] == 3:
-                        crop = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
-                    crop_t = self.transform(crop).unsqueeze(0).to(self.device)
-                    with torch.no_grad():
-                        feat = self.extractor(crop_t).mean([2, 3]).squeeze().cpu().numpy()
-                    det.curr_feat = feat
-                else:
-                    det.curr_feat = np.zeros(1280, dtype=np.float32)
+            self._extract_features(detections_second, raw_frame)
         r_tracked_stracks = [strack_pool[i] for i in u_track if strack_pool[i].state == TrackState.Tracked]
         dists = matching.iou_distance(r_tracked_stracks, detections_second)
         matches, u_track, u_detection_second = matching.linear_assignment(dists, thresh=0.5)
