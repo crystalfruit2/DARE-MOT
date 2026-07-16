@@ -255,6 +255,15 @@ class BYTETracker(object):
         self.lock_on = os.environ.get('DARE_LOCK', '1') == '1'     # kinematic/confidence hard lock
         self.reid_lambda = float(os.environ.get('DARE_LAMBDA', '0.5'))  # appearance weight in fused cost
 
+        # Scale-gated appearance fusion. The ablation shows appearance helps LARGE targets
+        # and hurts tiny ones (tens-of-pixel UAV crops carry no reliable identity), so gate
+        # the per-detection appearance weight by box AREA (original-image px):
+        #   DARE_LAMBDA_GATE='size' -> lambda ramps 0 (area<=GATE_LO) .. reid_lambda (area>=GATE_HI).
+        #   GATE_HI<=GATE_LO gives a hard gate at GATE_LO. Default 'none' = constant lambda (unchanged).
+        self.lambda_gate = os.environ.get('DARE_LAMBDA_GATE', 'none')  # 'none' | 'size'
+        self.gate_lo = float(os.environ.get('DARE_GATE_LO', '0'))      # area px; below -> lambda 0
+        self.gate_hi = float(os.environ.get('DARE_GATE_HI', '0'))      # area px; above -> full lambda
+
         # Fix #1 (foreground-focused appearance) & Fix #3 (re-association age cap) — meeting-brief-2026-07-16.
         # All default to reproduce the current real-appearance baseline exactly (no change when unset).
         self.crop_shrink = float(os.environ.get('DARE_CROP_SHRINK', '0.0'))  # shrink box each side toward center before ReID crop (fraction 0..0.4)
@@ -318,6 +327,22 @@ class BYTETracker(object):
             feat = (fmap[0] * w).sum(dim=(1, 2))    # [C]
             return feat.cpu().numpy()
         return fmap.mean([2, 3]).squeeze().cpu().numpy()
+
+    def _gated_lambda(self, detections):
+        """Appearance weight for the fused cost. Constant self.reid_lambda unless
+        DARE_LAMBDA_GATE='size', in which case it is gated per-detection by box area:
+        tiny targets (area<=gate_lo) get lambda 0 (IoU only — no reliable identity in a
+        few-pixel crop); large targets (area>=gate_hi) get the full lambda; linear ramp
+        between. gate_hi<=gate_lo => hard gate at gate_lo. Returned as a [n_det] vector
+        that broadcasts over the columns (detections) of the cost matrix."""
+        if self.lambda_gate != 'size' or len(detections) == 0:
+            return self.reid_lambda
+        areas = np.array([d.tlwh[2] * d.tlwh[3] for d in detections], dtype=np.float32)
+        if self.gate_hi <= self.gate_lo:
+            ramp = (areas >= self.gate_lo).astype(np.float32)
+        else:
+            ramp = np.clip((areas - self.gate_lo) / (self.gate_hi - self.gate_lo), 0.0, 1.0)
+        return self.reid_lambda * ramp
 
     def _extract_features_osnet(self, detections, raw_frame):
         """ReID features via a real person-ReID embedding (torchreid OSNet).
@@ -449,7 +474,8 @@ class BYTETracker(object):
         # embedding_distance_safe falls back to cost=1.0 for any track/det without features,
         # so the fused matrix degrades gracefully to IoU-only for those pairs.
         reid_dists = matching.embedding_distance_safe(strack_pool, detections)
-        dists = (1.0 - self.reid_lambda) * iou_dists + self.reid_lambda * reid_dists
+        lam = self._gated_lambda(detections)  # scalar, or per-detection [n_det] when size-gated
+        dists = (1.0 - lam) * iou_dists + lam * reid_dists
 
         matches, u_track, u_detection = matching.linear_assignment(dists, thresh=self.args.match_thresh)
 

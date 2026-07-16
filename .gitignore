@@ -175,3 +175,4 @@ _trackeval/trackers/
 # Pedestrian-only (class-leak-corrected) ground truth — regenerable via
 # _build_ped_gt.py from the raw VisDrone-MOT val annotations; keep the script.
 _ped_gt/
+/reid_train
