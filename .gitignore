@@ -171,3 +171,7 @@ _ablation_multiseq/
 # the ablation results and the shared dataset; keep run_hota.py (the actual script).
 _trackeval/gt/
 _trackeval/trackers/
+
+# Pedestrian-only (class-leak-corrected) ground truth — regenerable via
+# _build_ped_gt.py from the raw VisDrone-MOT val annotations; keep the script.
+_ped_gt/

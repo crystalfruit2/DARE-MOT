@@ -268,14 +268,35 @@ class BYTETracker(object):
         STrack.dare_diag = self.dare_diag
         STrack.gamma_devs = []
 
-        # --- LIGHTWEIGHT FEATURE EXTRACTOR ---
+        # --- FEATURE EXTRACTOR (ReID appearance embedding) ---
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.extractor = mobilenet_v2(pretrained=True).features.to(self.device).eval()
-        self.transform = T.Compose([
-            T.ToTensor(),
-            T.Resize((128, 64)),
-            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        ])
+        # DARE_REID selects the embedding:
+        #   'mobilenet' (default, legacy) — frozen ImageNet MobileNetV2 features. An
+        #       object-*classification* backbone pressed into *instance* ReID: wrong
+        #       objective, wrong domain. Kept as the baseline for the paper's
+        #       before/after (naive CNN features vs a real ReID embedding).
+        #   'osnet' — a purpose-built person-ReID embedding (torchreid OSNet,
+        #       instance-discriminative). The intended fix. Weights default to the
+        #       verified osnet_x1_0 MSMT17 checkpoint in reid_weights/.
+        self.reid_backend = os.environ.get('DARE_REID', 'mobilenet')
+        if self.reid_backend == 'osnet':
+            from torchreid.reid.utils import FeatureExtractor
+            model_name = os.environ.get('DARE_REID_MODEL', 'osnet_x1_0')
+            default_w = osp.join(osp.dirname(__file__), '..', '..',
+                                 'reid_weights', 'osnet_x1_0_msmt17.pth')
+            weights = os.environ.get('DARE_REID_WEIGHTS', default_w)
+            self.reid_extractor = FeatureExtractor(
+                model_name=model_name, model_path=weights,
+                device=str(self.device), verbose=False)
+            self.feat_dim = 512
+        else:
+            self.extractor = mobilenet_v2(pretrained=True).features.to(self.device).eval()
+            self.transform = T.Compose([
+                T.ToTensor(),
+                T.Resize((128, 64)),
+                T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            ])
+            self.feat_dim = 1280
 
     def _pool(self, fmap):
         """Pool a [1, C, H, W] feature map to [C].
@@ -298,12 +319,45 @@ class BYTETracker(object):
             return feat.cpu().numpy()
         return fmap.mean([2, 3]).squeeze().cpu().numpy()
 
+    def _extract_features_osnet(self, detections, raw_frame):
+        """ReID features via a real person-ReID embedding (torchreid OSNet).
+        The model does its own resize/normalize/pooling, so DARE_POOL and the
+        feature-map pooling knobs do not apply here; DARE_CROP_SHRINK still does
+        (shrinks the box before cropping to cut peripheral background). All crops
+        are embedded in one batched forward pass."""
+        H_img, W_img = raw_frame.shape[:2]
+        crops, idxs = [], []
+        for i, det in enumerate(detections):
+            x, y, w, h = det.tlwh
+            if self.crop_shrink > 0.0:
+                dx, dy = w * self.crop_shrink, h * self.crop_shrink
+                x, y, w, h = x + dx, y + dy, w - 2 * dx, h - 2 * dy
+            x, y, w, h = int(x), int(y), int(w), int(h)
+            x1, y1 = max(0, x), max(0, y)
+            x2, y2 = min(W_img, x + w), min(H_img, y + h)
+            crop = raw_frame[y1:y2, x1:x2]
+            if crop.size > 0:
+                if crop.ndim == 3 and crop.shape[2] == 3:
+                    crop = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+                crops.append(crop)
+                idxs.append(i)
+            else:
+                det.curr_feat = np.zeros(self.feat_dim, dtype=np.float32)
+        if crops:
+            with torch.no_grad():
+                feats = self.reid_extractor(crops).cpu().numpy()
+            for j, i in enumerate(idxs):
+                detections[i].curr_feat = feats[j].astype(np.float32)
+
     def _extract_features(self, detections, raw_frame):
         """Extract a ReID feature per detection from the raw frame.
         With DARE_CROP_SHRINK>0 the box is shrunk toward its center before
         cropping (cuts peripheral background before it enters the CNN);
         pooling is governed by DARE_POOL. Behavior is bit-identical to the
         old inline block when both knobs are at their defaults."""
+        if self.reid_backend == 'osnet':
+            self._extract_features_osnet(detections, raw_frame)
+            return
         H_img, W_img = raw_frame.shape[:2]
         for det in detections:
             x, y, w, h = det.tlwh
@@ -322,7 +376,7 @@ class BYTETracker(object):
                     fmap = self.extractor(crop_t)
                 det.curr_feat = self._pool(fmap)
             else:
-                det.curr_feat = np.zeros(1280, dtype=np.float32)
+                det.curr_feat = np.zeros(self.feat_dim, dtype=np.float32)
 
     def update(self, output_results, img_info, img_size):
         self.frame_id += 1

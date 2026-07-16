@@ -1,5 +1,6 @@
 from loguru import logger
 
+import numpy as np
 import torch
 import torch.backends.cudnn as cudnn
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -128,8 +129,10 @@ def compare_dataframes(gts, ts):
 def main(exp, args, num_gpu):
     if args.seed is not None:
         random.seed(args.seed)
+        np.random.seed(args.seed)
         torch.manual_seed(args.seed)
         cudnn.deterministic = True
+        torch.use_deterministic_algorithms(True, warn_only=True)
         warnings.warn(
             "You have chosen to seed testing. This will turn on the CUDNN deterministic setting, "
         )
@@ -137,7 +140,10 @@ def main(exp, args, num_gpu):
     is_distributed = num_gpu > 1
 
     # set environment variables for distributed training
-    cudnn.benchmark = True
+    # Non-determinism fix: cudnn.benchmark auto-tunes conv algorithms and reintroduces
+    # run-to-run variance even under a fixed seed (observed: two identical seeded runs
+    # differed by ~100 prediction lines). Enable it only when NOT seeding.
+    cudnn.benchmark = args.seed is None
 
     rank = args.local_rank
     # rank = get_local_rank()
