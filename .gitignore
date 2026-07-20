@@ -163,6 +163,14 @@ _reid_diag.out
 # DARE-MOT-paper-changelog.md), not tracked here.
 _ablation/
 
+# Ablation-ladder + gate-sweep + lock-check raw output (tracker logs + _*_scores.txt) —
+# generated, regenerable via _run_ablation_ladder.ps1 / _run_gate_sweep_ft.ps1 /
+# _run_lock_gate_check.ps1; numbers live in the vault (class-leak-analysis §14-15), keep the scripts.
+_ablation_ladder/
+_gate_sweep_ft/
+_gate_sweep/
+_lock_gate_check/
+
 # ID-switch review crops — generated diagnostic output, regenerable via _idswitch_extract.py
 _idswitch_review/
 _ablation_multiseq/
