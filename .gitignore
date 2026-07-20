@@ -170,6 +170,8 @@ _ablation_ladder/
 _gate_sweep_ft/
 _gate_sweep/
 _lock_gate_check/
+_iou_gate_sweep/
+_iou_gate_fine/
 
 # ID-switch review crops — generated diagnostic output, regenerable via _idswitch_extract.py
 _idswitch_review/
