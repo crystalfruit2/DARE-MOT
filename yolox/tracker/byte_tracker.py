@@ -45,36 +45,37 @@ class STrack(BaseTrack):
         self.beta = float(os.environ.get('DARE_BETA', '4.0'))      # Inertia of Memory (Option A)
         self.tau = float(os.environ.get('DARE_TAU', '0.5'))        # Softmax Temperature (Option B)
         self.static_ema = float(os.environ.get('DARE_STATIC_EMA', '-1'))  # >=0: static-EMA control gamma
+        # Ablation knobs (meeting-notes-2026-07-16). Defaults reproduce the validated N=2 dynamic config.
+        self.agg_order = int(os.environ.get('DARE_AGG_ORDER', '2'))  # 2 = [t-2,t-1,t]; 1 = [t-1,t] dynamic
+        _sg = os.environ.get('DARE_STATIC_GAMMAS', '').strip()       # fixed weights -> static-EMA at N=2
+        self.static_gammas = np.array([float(x) for x in _sg.split(',')]) if _sg else None
     def _calculate_gammas(self):
         """
         Calculates dynamic weights based on the historical confidences.
-        Assumes self.scores has exactly 3 elements: [c_{t-2}, c_{t-1}, c_t]
+        Order 2 (default): 3-tap over [c_{t-2}, c_{t-1}, c_t] -> [gamma_2, gamma_1, gamma_0].
+        Order 1 (ablation): 2-tap over [c_{t-1}, c_t]        -> [gamma_1, gamma_0].
         """
-        c_t2 = self.scores[0]
-        c_t1 = self.scores[1]
-        c_t = self.scores[2]
-        
+        if self.agg_order == 1:
+            c_hist = [self.scores[-2], self.scores[-1]]        # [c_{t-1}, c_t]
+        else:
+            c_hist = [self.scores[0], self.scores[1], self.scores[2]]  # [c_{t-2}, c_{t-1}, c_t]
+
         if self.agg_option == 'A':
             # Option A: L1 Normalization with Historical Bias
-            denom = c_t + self.beta * (c_t1 + c_t2) + 1e-6 # Add epsilon to prevent div by zero
-            
-            gamma_0 = c_t / denom
-            gamma_1 = (self.beta * c_t1) / denom
-            gamma_2 = (self.beta * c_t2) / denom
-            
-            return np.array([gamma_2, gamma_1, gamma_0])
-            
+            c_t = c_hist[-1]
+            older = c_hist[:-1]
+            denom = c_t + self.beta * sum(older) + 1e-6  # epsilon prevents div by zero
+            gammas = [self.beta * c / denom for c in older] + [c_t / denom]
+            return np.array(gammas)
+
         elif self.agg_option == 'B':
             # Option B: Temperature-Scaled Softmax
-            scores_array = np.array([c_t2, c_t1, c_t])
+            scores_array = np.array(c_hist)
             scaled_scores = scores_array / self.tau
-            
             # Numerical stability: subtract max before exponentiating
             exp_scores = np.exp(scaled_scores - np.max(scaled_scores))
-            gammas = exp_scores / np.sum(exp_scores)
-            
-            return gammas
-            
+            return exp_scores / np.sum(exp_scores)
+
         else:
             raise ValueError("agg_option must be 'A' or 'B'")
 
@@ -94,6 +95,23 @@ class STrack(BaseTrack):
             else:
                 g = self.static_ema
                 new_smooth = g * self.smooth_feat + (1.0 - g) * f_t
+        elif self.static_gammas is not None:
+            # Static-EMA at N=2 (ablation): fixed-weight 3-tap over [F^{t-2}, F^{t-1}, f^t].
+            # Same window as the dynamic path, but weights are constant (not confidence-derived) —
+            # isolates the value of dynamic weighting at equal order.
+            if len(self.smooth_history) < 2:
+                new_smooth = f_t.copy()
+            else:
+                feats_array = np.array([self.smooth_history[0], self.smooth_history[1], f_t])
+                new_smooth = np.average(feats_array, axis=0, weights=self.static_gammas)
+        elif self.agg_order == 1:
+            # Order-1 dynamic aggregation (ablation): 2-tap over [F^{t-1}, f^t] with dynamic gammas.
+            if len(self.smooth_history) < 1 or len(self.scores) < 2:
+                new_smooth = f_t.copy()
+            else:
+                gammas = self._calculate_gammas()   # [gamma_1, gamma_0]
+                feats_array = np.array([self.smooth_history[-1], f_t])
+                new_smooth = np.average(feats_array, axis=0, weights=gammas)
         elif len(self.smooth_history) < 2:
             # Warmup: not enough history yet, use raw feature directly
             new_smooth = f_t.copy()
