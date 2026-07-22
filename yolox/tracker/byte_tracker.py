@@ -282,6 +282,15 @@ class BYTETracker(object):
         self.gate_lo = float(os.environ.get('DARE_GATE_LO', '0'))      # area px; below -> lambda 0
         self.gate_hi = float(os.environ.get('DARE_GATE_HI', '0'))      # area px; above -> full lambda
 
+        # IoU-feasibility gate on the first-pass fused cost. Decomposition (2026-07-20) showed
+        # the appearance term manufactures FP by letting a low ReID distance pull a
+        # geometrically-implausible (low-IoU) pair under match_thresh. This masks any pair whose
+        # RAW IoU distance (1-IoU, pre fuse_score) exceeds the gate to inf, so appearance can only
+        # re-rank IoU-feasible candidates, never rescue a non-overlapping one.
+        #   DARE_IOU_GATE = max allowed 1-IoU for an appearance-eligible match (e.g. 0.7 => IoU>=0.3).
+        #   Default 1.0 = off (1-IoU never exceeds 1) => byte-identical to prior behavior.
+        self.iou_gate = float(os.environ.get('DARE_IOU_GATE', '1.0'))
+
         # Fix #1 (foreground-focused appearance) & Fix #3 (re-association age cap) — meeting-brief-2026-07-16.
         # All default to reproduce the current real-appearance baseline exactly (no change when unset).
         self.crop_shrink = float(os.environ.get('DARE_CROP_SHRINK', '0.0'))  # shrink box each side toward center before ReID crop (fraction 0..0.4)
@@ -485,6 +494,7 @@ class BYTETracker(object):
         STrack.multi_predict(strack_pool)
 
         iou_dists = matching.iou_distance(strack_pool, detections)
+        raw_iou_dists = iou_dists.copy()  # geometry only (1-IoU), before score fusion; used by the IoU gate
         if not self.args.mot20:
             iou_dists = matching.fuse_score(iou_dists, detections)
 
@@ -494,6 +504,10 @@ class BYTETracker(object):
         reid_dists = matching.embedding_distance_safe(strack_pool, detections)
         lam = self._gated_lambda(detections)  # scalar, or per-detection [n_det] when size-gated
         dists = (1.0 - lam) * iou_dists + lam * reid_dists
+
+        # IoU-feasibility gate: appearance may re-rank but not rescue non-overlapping pairs.
+        if self.iou_gate < 1.0:
+            dists[raw_iou_dists > self.iou_gate] = np.inf
 
         matches, u_track, u_detection = matching.linear_assignment(dists, thresh=self.args.match_thresh)
 
