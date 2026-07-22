@@ -184,3 +184,5 @@ _trackeval/trackers/
 # _build_ped_gt.py from the raw VisDrone-MOT val annotations; keep the script.
 _ped_gt/
 /reid_train
+/_iou_gate_fine
+/_iou_gate_sweep
