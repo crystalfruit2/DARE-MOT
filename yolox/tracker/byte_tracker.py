@@ -15,7 +15,7 @@ from .basetrack import BaseTrack, TrackState
 
 class STrack(BaseTrack):
     shared_kalman = KalmanFilter()
-    def __init__(self, tlwh, score, feature=None):
+    def __init__(self, tlwh, score, feature=None, cls=-1):
 
         # wait activate
         self._tlwh = np.asarray(tlwh, dtype=np.float64)
@@ -24,6 +24,10 @@ class STrack(BaseTrack):
         self.is_activated = False
 
         self.score = score
+        # Detector class of the most recent matched detection (model head id, 0..N-1;
+        # -1 = unknown). Threaded through so per-class MOT scoring is possible; class is
+        # NOT used in association — tracking stays class-agnostic, only scoring splits by it.
+        self.cls = int(cls)
         self.tracklet_len = 0
 
         # smooth_history stores the last 2 aggregated templates F^{t-2}, F^{t-1}
@@ -180,6 +184,7 @@ class STrack(BaseTrack):
         if new_id:
             self.track_id = self.next_id()
         self.score = new_track.score
+        self.cls = new_track.cls
 
     def update(self, new_track, frame_id):
         """
@@ -199,6 +204,7 @@ class STrack(BaseTrack):
         self.is_activated = True
 
         self.score = new_track.score
+        self.cls = new_track.cls
 
     @property
     # @jit(nopython=True)
@@ -443,10 +449,13 @@ class BYTETracker(object):
         if output_results.shape[1] == 5:
             scores = output_results[:, 4]
             bboxes = output_results[:, :4]
+            classes = np.full(len(output_results), -1)  # no class info in the 5-col path
         else:
             output_results = output_results.cpu().numpy()
             scores = output_results[:, 4] * output_results[:, 5]
             bboxes = output_results[:, :4]  # x1y1x2y2
+            # YOLOX postprocess col 6 = predicted class (model head id, 0..num_classes-1)
+            classes = output_results[:, 6] if output_results.shape[1] > 6 else np.full(len(output_results), -1)
         if raw_frame is not None:
             img_h, img_w = raw_frame.shape[:2]
         else:
@@ -463,11 +472,13 @@ class BYTETracker(object):
         dets = bboxes[remain_inds]
         scores_keep = scores[remain_inds]
         scores_second = scores[inds_second]
+        classes_keep = classes[remain_inds]
+        classes_second = classes[inds_second]
 
         if len(dets) > 0:
             '''Detections'''
-            detections = [STrack(STrack.tlbr_to_tlwh(tlbr), s) for
-                          (tlbr, s) in zip(dets, scores_keep)]
+            detections = [STrack(STrack.tlbr_to_tlwh(tlbr), s, cls=c) for
+                          (tlbr, s, c) in zip(dets, scores_keep, classes_keep)]
         else:
             detections = []
 
@@ -547,8 +558,8 @@ class BYTETracker(object):
         # association the untrack to the low score detections
         if len(dets_second) > 0:
             '''Detections'''
-            detections_second = [STrack(STrack.tlbr_to_tlwh(tlbr), s) for
-                          (tlbr, s) in zip(dets_second, scores_second)]
+            detections_second = [STrack(STrack.tlbr_to_tlwh(tlbr), s, cls=c) for
+                          (tlbr, s, c) in zip(dets_second, scores_second, classes_second)]
         else:
             detections_second = []
 

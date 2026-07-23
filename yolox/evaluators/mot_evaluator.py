@@ -28,14 +28,23 @@ import time
 
 
 def write_results(filename, results):
-    save_format = '{frame},{id},{x1},{y1},{w},{h},{s},-1,-1,-1\n'
+    # VisDrone/MOTChallenge line: frame,id,x,y,w,h,score,category,-1,-1
+    # category = MC class id (1..5); -1 when the tracker carried no class (single-class runs
+    # or non-ByteTrack evaluators that emit 4-tuples). Threaded through so _score_multiclass.py
+    # can split predictions by class. Backward-compatible: accepts 4- or 5-tuples per frame.
+    save_format = '{frame},{id},{x1},{y1},{w},{h},{s},{cls},-1,-1\n'
     with open(filename, 'w') as f:
-        for frame_id, tlwhs, track_ids, scores in results:
-            for tlwh, track_id, score in zip(tlwhs, track_ids, scores):
+        for row in results:
+            if len(row) == 5:
+                frame_id, tlwhs, track_ids, scores, classes = row
+            else:
+                frame_id, tlwhs, track_ids, scores = row
+                classes = [-1] * len(track_ids)
+            for tlwh, track_id, score, cls in zip(tlwhs, track_ids, scores, classes):
                 if track_id < 0:
                     continue
                 x1, y1, w, h = tlwh
-                line = save_format.format(frame=frame_id, id=track_id, x1=round(x1, 1), y1=round(y1, 1), w=round(w, 1), h=round(h, 1), s=round(score, 2))
+                line = save_format.format(frame=frame_id, id=track_id, x1=round(x1, 1), y1=round(y1, 1), w=round(w, 1), h=round(h, 1), s=round(score, 2), cls=int(cls))
                 f.write(line)
     logger.info('save results to {}'.format(filename))
 
@@ -203,16 +212,22 @@ class MOTEvaluator:
                 online_tlwhs = []
                 online_ids = []
                 online_scores = []
+                online_classes = []
                 for t in online_targets:
                     tlwh = t.tlwh
                     tid = t.track_id
-                    vertical = tlwh[2] / tlwh[3] > 1.6
+                    # The wide-box ("vertical") reject was tuned for upright pedestrians; it would
+                    # drop most vehicles (cars/buses are wide), so apply it only in single-class
+                    # (pedestrian) runs. Multi-class keeps every box and lets scoring split by class.
+                    vertical = (self.num_classes == 1) and (tlwh[2] / tlwh[3] > 1.6)
                     if tlwh[2] * tlwh[3] > self.args.min_box_area and not vertical:
                         online_tlwhs.append(tlwh)
                         online_ids.append(tid)
                         online_scores.append(t.score)
+                        # emit MC category (1..5) = model head class (0..4) + 1; -1 stays -1
+                        online_classes.append(t.cls + 1 if t.cls >= 0 else -1)
                 # save results
-                results.append((frame_id, online_tlwhs, online_ids, online_scores))
+                results.append((frame_id, online_tlwhs, online_ids, online_scores, online_classes))
 
             if is_time_record:
                 track_end = time_synchronized()
