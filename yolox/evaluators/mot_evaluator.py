@@ -27,6 +27,26 @@ import tempfile
 import time
 
 
+def make_tracker(args):
+    """Select the tracker for a CONTROLLED Path-1 comparison via env DARE_TRACKER
+    (dare|bytetrack -> BYTETracker; ocsort|botsort|deepocsort -> baselines/ adapters).
+    All share this detector + preprocessing + scoring; only association differs. Adapters
+    are imported lazily so their deps load only when actually selected. See
+    [[Projects/Dare_Mot/path1-baseline-integration-2026-07-23]]."""
+    which = os.environ.get("DARE_TRACKER", "dare").strip().lower()
+    if which in ("dare", "bytetrack", ""):
+        # ByteTrack is DARE with appearance off (DARE_LAMBDA=0), set by the run script.
+        return BYTETracker(args)
+    if which == "ocsort":
+        from baselines.adapters import OCSortAdapter
+        return OCSortAdapter(args)
+    if which in ("botsort", "deepocsort"):
+        raise NotImplementedError(
+            f"DARE_TRACKER={which} adapter not built yet (needs shared-ReID + GMC/CMC wiring; "
+            "Path-1 build step 5). OC-SORT + selection hook are in.")
+    raise ValueError(f"unknown DARE_TRACKER={which!r} (dare|bytetrack|ocsort|botsort|deepocsort)")
+
+
 def write_results(filename, results):
     # VisDrone/MOTChallenge line: frame,id,x,y,w,h,score,category,-1,-1
     # category = MC class id (1..5); -1 when the tracker carried no class (single-class runs
@@ -174,7 +194,7 @@ class MOTEvaluator:
                         result_filename = os.path.join(result_folder, '{}.txt'.format(video_names[video_id - 1]))
                         write_results(result_filename, results)
                         results = []
-                    tracker = BYTETracker(self.args)
+                    tracker = make_tracker(self.args)
 
                 imgs = imgs.type(tensor_type)
 

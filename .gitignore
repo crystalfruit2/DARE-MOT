@@ -188,3 +188,7 @@ _ped_gt/
 /reid_train
 /_iou_gate_fine
 /_iou_gate_sweep
+
+# Path-1 baseline reference clones (large; vendor only adapter files into baselines/)
+_baselines/
+_mc_*.log
