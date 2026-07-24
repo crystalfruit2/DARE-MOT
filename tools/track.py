@@ -1,6 +1,17 @@
 from loguru import logger
 
 import numpy as np
+
+# motmetrics 1.4.0 predates NumPy 2.0, which removed np.asfarray / np.float_ (both used deep in
+# motmetrics.distances). The dare_mot env runs NumPy 2.4.6 and cannot be downgraded (the detector
+# trains in it), so restore the removed aliases before motmetrics is imported/used below. Without
+# this, track.py's own end-of-run MOTA eval (compare_dataframes -> compute_many) crashes AFTER the
+# tracking inference completes. Mirrors the shim in _score_multiclass.py.
+if not hasattr(np, "asfarray"):
+    np.asfarray = lambda a, dtype=np.float64: np.asarray(a, dtype=dtype)
+if not hasattr(np, "float_"):
+    np.float_ = np.float64
+
 import torch
 import torch.backends.cudnn as cudnn
 from torch.nn.parallel import DistributedDataParallel as DDP
