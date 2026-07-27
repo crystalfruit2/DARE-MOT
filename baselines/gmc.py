@@ -212,8 +212,18 @@ class GMC:
         if self.downscale > 1.0:
             frame = cv2.resize(frame, (width // self.downscale, height // self.downscale))
 
+        # Foreground mask: exclude detection regions so the motion estimate is driven by the
+        # static background rather than moving objects (critical in dense aerial scenes where
+        # foreground dominates the frame). detections=None -> original unmasked behavior.
+        mask = None
+        if detections is not None and len(detections) > 0:
+            mask = np.full(frame.shape[:2], 255, dtype=np.uint8)
+            for det in detections:
+                x1, y1, x2, y2 = (np.asarray(det[:4], dtype=float) / self.downscale).astype(int)
+                mask[max(0, y1):max(0, y2), max(0, x1):max(0, x2)] = 0
+
         # find the keypoints
-        keypoints = cv2.goodFeaturesToTrack(frame, mask=None, **self.feature_params)
+        keypoints = cv2.goodFeaturesToTrack(frame, mask=mask, **self.feature_params)
 
         # Handle first frame
         if not self.initializedFirstFrame:

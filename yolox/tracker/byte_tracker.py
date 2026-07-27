@@ -159,6 +159,25 @@ class STrack(BaseTrack):
                 stracks[i].mean = mean
                 stracks[i].covariance = cov
 
+    @staticmethod
+    def multi_gmc(stracks, H=np.eye(2, 3)):
+        """Camera Motion Compensation (Move 1). Warp each track's predicted KF state
+        by the inter-frame affine H (prev->curr) so the Kalman prediction is expressed
+        in the current frame's coordinates before matching. Standard BoT-SORT recipe on
+        the shared xyah state [x,y,a,h,vx,vy,va,vh]; a no-op when H is identity."""
+        if len(stracks) > 0:
+            multi_mean = np.asarray([st.mean.copy() for st in stracks])
+            multi_covariance = np.asarray([st.covariance for st in stracks])
+            R = H[:2, :2]
+            R8x8 = np.kron(np.eye(4, dtype=float), R)
+            t = H[:2, 2]
+            for i, (mean, cov) in enumerate(zip(multi_mean, multi_covariance)):
+                mean = R8x8.dot(mean)
+                mean[:2] += t
+                cov = R8x8.dot(cov).dot(R8x8.transpose())
+                stracks[i].mean = mean
+                stracks[i].covariance = cov
+
     def activate(self, kalman_filter, frame_id):
         """Start a new tracklet"""
         self.kalman_filter = kalman_filter
@@ -274,6 +293,20 @@ class BYTETracker(object):
         self.buffer_size = int(frame_rate / 30.0 * args.track_buffer)
         self.max_time_lost = self.buffer_size
         self.kalman_filter = KalmanFilter()
+
+        # Camera Motion Compensation (Move 1). DARE_CMC = none (default) | sparseOptFlow | ecc | orb.
+        # When set, an inter-frame affine warp is applied to every predicted track state before
+        # matching (VisDrone has heavy drone motion; the KF assumes a static camera). Lazy import
+        # so default (none) runs are byte-identical and never touch the GMC module.
+        self.cmc_method = os.environ.get('DARE_CMC', 'none')
+        # DARE_CMC_MASK=1 excludes detection regions from the motion estimate (foreground
+        # masking) so the warp reflects camera, not object, motion. Default 0 = unmasked.
+        self.cmc_mask = os.environ.get('DARE_CMC_MASK', '0') == '1'
+        self.gmc = None
+        if self.cmc_method not in ('none', 'None', ''):
+            from baselines.gmc import GMC  # repo-root package; PYTHONPATH set by the run harness
+            self.gmc = GMC(method=self.cmc_method,
+                           downscale=int(os.environ.get('DARE_CMC_DOWNSCALE', '2')))
 
         # Ablation knobs (env-overridable; defaults reproduce validated behavior)
         self.lock_on = os.environ.get('DARE_LOCK', '1') == '1'     # kinematic/confidence hard lock
@@ -526,6 +559,15 @@ class BYTETracker(object):
             eligible_lost = self.lost_stracks
         strack_pool = joint_stracks(tracked_stracks, eligible_lost)
         STrack.multi_predict(strack_pool)
+
+        # Camera Motion Compensation: warp predicted states into the current frame before
+        # matching. Applied to both the main pool and unconfirmed tracks (as in BoT-SORT).
+        if self.gmc is not None and raw_frame is not None:
+            gmc_dets = (np.array([d.tlbr for d in detections])
+                        if (self.cmc_mask and len(detections) > 0) else None)
+            warp = self.gmc.apply(raw_frame, gmc_dets)
+            STrack.multi_gmc(strack_pool, warp)
+            STrack.multi_gmc(unconfirmed, warp)
 
         iou_dists = matching.iou_distance(strack_pool, detections)
         raw_iou_dists = iou_dists.copy()  # geometry only (1-IoU), before score fusion; used by the IoU gate
