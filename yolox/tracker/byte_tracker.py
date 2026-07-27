@@ -288,6 +288,15 @@ class BYTETracker(object):
         self.gate_lo = float(os.environ.get('DARE_GATE_LO', '0'))      # area px; below -> lambda 0
         self.gate_hi = float(os.environ.get('DARE_GATE_HI', '0'))      # area px; above -> full lambda
 
+        # Class-exclude gate (2026-07-24 diagnostic): force lambda=0 (IoU-only, i.e. ByteTrack
+        # matching) for specific detection classes, composable with the size gate above. Model
+        # head ids are 0-indexed (0=pedestrian,1=car,2=van,3=truck,4=bus per convert_visdrone_mc.py).
+        # e.g. DARE_LAMBDA_CLASS_EXCLUDE=3,4 turns appearance off for truck+bus only. Empty (default)
+        # = no exclusion, unchanged behavior.
+        self.lambda_class_exclude = set(
+            int(c) for c in os.environ.get('DARE_LAMBDA_CLASS_EXCLUDE', '').split(',') if c.strip() != ''
+        )
+
         # IoU-feasibility gate on the first-pass fused cost. Decomposition (2026-07-20) showed
         # the appearance term manufactures FP by letting a low ReID distance pull a
         # geometrically-implausible (low-IoU) pair under match_thresh. This masks any pair whose
@@ -365,19 +374,31 @@ class BYTETracker(object):
 
     def _gated_lambda(self, detections):
         """Appearance weight for the fused cost. Constant self.reid_lambda unless
-        DARE_LAMBDA_GATE='size', in which case it is gated per-detection by box area:
-        tiny targets (area<=gate_lo) get lambda 0 (IoU only — no reliable identity in a
-        few-pixel crop); large targets (area>=gate_hi) get the full lambda; linear ramp
-        between. gate_hi<=gate_lo => hard gate at gate_lo. Returned as a [n_det] vector
-        that broadcasts over the columns (detections) of the cost matrix."""
-        if self.lambda_gate != 'size' or len(detections) == 0:
+        DARE_LAMBDA_GATE='size' and/or DARE_LAMBDA_CLASS_EXCLUDE is set, in which case a
+        per-detection [n_det] vector is returned (broadcasts over the columns/detections
+        of the cost matrix):
+          size gate: tiny targets (area<=gate_lo) get lambda 0 (IoU only — no reliable
+            identity in a few-pixel crop); large targets (area>=gate_hi) get the full
+            lambda; linear ramp between. gate_hi<=gate_lo => hard gate at gate_lo.
+          class-exclude: forces lambda 0 for detections whose class is in the exclude
+            set, on top of (composes with) whatever the size gate already produced."""
+        if len(detections) == 0:
             return self.reid_lambda
-        areas = np.array([d.tlwh[2] * d.tlwh[3] for d in detections], dtype=np.float32)
-        if self.gate_hi <= self.gate_lo:
-            ramp = (areas >= self.gate_lo).astype(np.float32)
+        if self.lambda_gate == 'size':
+            areas = np.array([d.tlwh[2] * d.tlwh[3] for d in detections], dtype=np.float32)
+            if self.gate_hi <= self.gate_lo:
+                ramp = (areas >= self.gate_lo).astype(np.float32)
+            else:
+                ramp = np.clip((areas - self.gate_lo) / (self.gate_hi - self.gate_lo), 0.0, 1.0)
+            lam = self.reid_lambda * ramp
+        elif self.lambda_class_exclude:
+            lam = np.full(len(detections), self.reid_lambda, dtype=np.float32)
         else:
-            ramp = np.clip((areas - self.gate_lo) / (self.gate_hi - self.gate_lo), 0.0, 1.0)
-        return self.reid_lambda * ramp
+            return self.reid_lambda
+        if self.lambda_class_exclude:
+            cls_arr = np.array([d.cls for d in detections], dtype=np.int64)
+            lam = np.where(np.isin(cls_arr, list(self.lambda_class_exclude)), 0.0, lam)
+        return lam
 
     def _extract_features_osnet(self, detections, raw_frame):
         """ReID features via a real person-ReID embedding (torchreid OSNet).
