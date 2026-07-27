@@ -47,7 +47,14 @@ SEQS = [
     "uav0000339_00001_v",
 ]
 
-METRICS = ["num_switches", "idf1", "mota", "num_false_positives", "num_misses"]
+# idtp/idfp/idfn/num_objects are the raw counts needed to build a count-pooled (micro-average)
+# MOTA/IDF1 in addition to the class-averaged (macro) one. Micro respects class boundaries (no
+# cross-class matching -- each class is scored in its own accumulator) but weights each class by
+# its object count, so it is NOT dominated by the tiny-sample truck/bus classes the way the plain
+# class-average is. Reporting both is the honest thing: macro = "mean over classes", micro =
+# "overall over objects" (the standard MOTChallenge pooled convention, computed class-safely).
+METRICS = ["num_switches", "idf1", "mota", "num_false_positives", "num_misses",
+           "num_objects", "idtp", "idfp", "idfn"]
 
 
 def res_path(expn, seq):
@@ -110,13 +117,32 @@ def score_run(expn):
                 "mota": float(summ["mota"]),
                 "fp": int(summ["num_false_positives"]),
                 "fn": int(summ["num_misses"]),
+                "gt": int(summ["num_objects"]),
+                "idtp": int(summ["idtp"]),
+                "idfp": int(summ["idfp"]),
+                "idfn": int(summ["idfn"]),
             }
 
     scored = {c: v for c, v in per_class.items() if v is not None}
     n = len(scored) or 1
+    # Macro = class-average (VisDrone-MOT convention): plain mean of the per-class rates.
     per_class["AVG"] = {
         "idf1": sum(v["idf1"] for v in scored.values()) / n,
         "mota": sum(v["mota"] for v in scored.values()) / n,
+    }
+    # Micro = count-pooled ("overall over objects"): rebuild MOTA/IDF1 from summed raw counts.
+    #   MOTA = 1 - (FN + FP + IDSw) / GT ;  IDF1 = 2*IDTP / (2*IDTP + IDFP + IDFN)
+    sum_fp  = sum(v["fp"]   for v in scored.values())
+    sum_fn  = sum(v["fn"]   for v in scored.values())
+    sum_sw  = sum(v["idsw"] for v in scored.values())
+    sum_gt  = sum(v["gt"]   for v in scored.values()) or 1
+    sum_tp  = sum(v["idtp"] for v in scored.values())
+    sum_ifp = sum(v["idfp"] for v in scored.values())
+    sum_ifn = sum(v["idfn"] for v in scored.values())
+    per_class["MICRO"] = {
+        "mota": 1.0 - (sum_fn + sum_fp + sum_sw) / sum_gt,
+        "idf1": (2.0 * sum_tp) / ((2.0 * sum_tp + sum_ifp + sum_ifn) or 1),
+        "gt": sum_gt,
     }
     per_class["SUM_IDSw"] = sum(v["idsw"] for v in scored.values())
     return per_class
@@ -132,10 +158,12 @@ def print_table(expn, res):
         else:
             print(f"{name:12s} {v['idsw']:6d} {v['idf1']*100:6.1f}% {v['mota']*100:7.1f}% "
                   f"{v['fp']:8d} {v['fn']:8d}")
-    avg = res["AVG"]
+    avg, mic = res["AVG"], res["MICRO"]
     print(f"{'-'*12}")
-    print(f"{'AVG(classes)':12s} {res['SUM_IDSw']:6d} {avg['idf1']*100:6.1f}% {avg['mota']*100:7.1f}%"
-          f"   (IDSw col = SUM across classes)")
+    print(f"{'AVG (macro)':12s} {res['SUM_IDSw']:6d} {avg['idf1']*100:6.1f}% {avg['mota']*100:7.1f}%"
+          f"   (class-average; IDSw col = SUM across classes)")
+    print(f"{'AVG (micro)':12s} {res['SUM_IDSw']:6d} {mic['idf1']*100:6.1f}% {mic['mota']*100:7.1f}%"
+          f"   (count-pooled over {mic['gt']} objects; MOTChallenge overall)")
 
 
 def main():
@@ -160,10 +188,14 @@ def main():
                 continue
             print(f"{name:12s} {va['idsw']-vb['idsw']:+6d} {(va['idf1']-vb['idf1'])*100:+7.1f}% "
                   f"{(va['mota']-vb['mota'])*100:+7.1f}%")
+        dsw = res_a['SUM_IDSw'] - res_b['SUM_IDSw']
         da_idf1 = (res_a['AVG']['idf1'] - res_b['AVG']['idf1']) * 100
         da_mota = (res_a['AVG']['mota'] - res_b['AVG']['mota']) * 100
+        dm_idf1 = (res_a['MICRO']['idf1'] - res_b['MICRO']['idf1']) * 100
+        dm_mota = (res_a['MICRO']['mota'] - res_b['MICRO']['mota']) * 100
         print(f"{'-'*12}")
-        print(f"{'AVG':12s} {res_a['SUM_IDSw']-res_b['SUM_IDSw']:+6d} {da_idf1:+7.1f}% {da_mota:+7.1f}%")
+        print(f"{'AVG (macro)':12s} {dsw:+6d} {da_idf1:+7.1f}% {da_mota:+7.1f}%   (class-average)")
+        print(f"{'AVG (micro)':12s} {dsw:+6d} {dm_idf1:+7.1f}% {dm_mota:+7.1f}%   (count-pooled overall)")
 
 
 if __name__ == "__main__":

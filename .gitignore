@@ -182,6 +182,10 @@ _ablation_multiseq/
 _trackeval/gt/
 _trackeval/trackers/
 
+# Multi-class HOTA scratch workspace — same pattern as _trackeval/gt|trackers above,
+# regenerable via _score_hota_mc.py; keep the script, not the GT/tracker data copies.
+_trackeval/_mc_hota_ws/
+
 # Pedestrian-only (class-leak-corrected) ground truth — regenerable via
 # _build_ped_gt.py from the raw VisDrone-MOT val annotations; keep the script.
 _ped_gt/
