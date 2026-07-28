@@ -1,0 +1,99 @@
+﻿
+=== mc_lad_agg_A  [per-class, IoU@0.5] ===
+class          IDSw    IDF1     MOTA       FP       FN
+pedestrian      118   61.9%    44.4%     4150    13740
+car             144   68.1%    50.6%     5473    10105
+van              20   45.0%    21.9%      915     4406
+truck             0   61.7%    10.0%      851      372
+bus               0   22.8%    -8.0%       63      222
+------------
+AVG (macro)     282   51.9%    23.8%   (class-average; IDSw col = SUM across classes)
+AVG (micro)     282   63.3%    44.2%   (count-pooled over 72690 objects; MOTChallenge overall)
+
+=== mc_lad_dare_full  [per-class, IoU@0.5] ===
+class          IDSw    IDF1     MOTA       FP       FN
+pedestrian      113   61.9%    44.5%     4167    13718
+car             140   68.2%    50.6%     5472    10097
+van              16   45.1%    22.0%      915     4406
+truck             0   61.8%    10.2%      849      372
+bus               0   22.8%    -8.0%       63      222
+------------
+AVG (macro)     269   51.9%    23.9%   (class-average; IDSw col = SUM across classes)
+AVG (micro)     269   63.3%    44.2%   (count-pooled over 72690 objects; MOTChallenge overall)
+
+=== DELTA  mc_lad_agg_A  -  mc_lad_dare_full ===
+class         dIDSw    dIDF1    dMOTA
+pedestrian       +5    +0.0%    -0.0%
+car              +4    -0.0%    -0.0%
+van              +4    -0.1%    -0.1%
+truck            +0    -0.0%    -0.1%
+bus              +0    +0.0%    +0.0%
+------------
+AVG (macro)     +13    -0.0%    -0.1%   (class-average)
+AVG (micro)     +13    -0.0%    -0.0%   (count-pooled overall)
+
+=== mc_lad_order5  [per-class, IoU@0.5] ===
+class          IDSw    IDF1     MOTA       FP       FN
+pedestrian      116   61.9%    44.4%     4156    13735
+car             146   68.2%    50.6%     5469    10112
+van              17   45.2%    22.3%      893     4405
+truck             0   61.8%    10.1%      850      372
+bus               0   22.8%    -8.0%       63      222
+------------
+AVG (macro)     279   52.0%    23.9%   (class-average; IDSw col = SUM across classes)
+AVG (micro)     279   63.3%    44.2%   (count-pooled over 72690 objects; MOTChallenge overall)
+
+=== mc_lad_dare_full  [per-class, IoU@0.5] ===
+class          IDSw    IDF1     MOTA       FP       FN
+pedestrian      113   61.9%    44.5%     4167    13718
+car             140   68.2%    50.6%     5472    10097
+van              16   45.1%    22.0%      915     4406
+truck             0   61.8%    10.2%      849      372
+bus               0   22.8%    -8.0%       63      222
+------------
+AVG (macro)     269   51.9%    23.9%   (class-average; IDSw col = SUM across classes)
+AVG (micro)     269   63.3%    44.2%   (count-pooled over 72690 objects; MOTChallenge overall)
+
+=== DELTA  mc_lad_order5  -  mc_lad_dare_full ===
+class         dIDSw    dIDF1    dMOTA
+pedestrian       +3    -0.0%    -0.0%
+car              +6    +0.0%    -0.1%
+van              +1    +0.1%    +0.3%
+truck            +0    -0.0%    -0.1%
+bus              +0    +0.0%    +0.0%
+------------
+AVG (macro)     +10    +0.0%    +0.0%   (class-average)
+AVG (micro)     +10    -0.0%    -0.0%   (count-pooled overall)
+
+=== mc_lad_order10  [per-class, IoU@0.5] ===
+class          IDSw    IDF1     MOTA       FP       FN
+pedestrian      123   62.2%    44.4%     4167    13721
+car             153   68.1%    50.5%     5475    10111
+van              12   45.6%    22.5%      887     4406
+truck             0   61.8%    10.1%      850      372
+bus               0   23.0%    -6.8%       60      222
+------------
+AVG (macro)     288   52.1%    24.1%   (class-average; IDSw col = SUM across classes)
+AVG (micro)     288   63.5%    44.2%   (count-pooled over 72690 objects; MOTChallenge overall)
+
+=== mc_lad_dare_full  [per-class, IoU@0.5] ===
+class          IDSw    IDF1     MOTA       FP       FN
+pedestrian      113   61.9%    44.5%     4167    13718
+car             140   68.2%    50.6%     5472    10097
+van              16   45.1%    22.0%      915     4406
+truck             0   61.8%    10.2%      849      372
+bus               0   22.8%    -8.0%       63      222
+------------
+AVG (macro)     269   51.9%    23.9%   (class-average; IDSw col = SUM across classes)
+AVG (micro)     269   63.3%    44.2%   (count-pooled over 72690 objects; MOTChallenge overall)
+
+=== DELTA  mc_lad_order10  -  mc_lad_dare_full ===
+class         dIDSw    dIDF1    dMOTA
+pedestrian      +10    +0.3%    -0.0%
+car             +13    -0.1%    -0.1%
+van              -4    +0.5%    +0.5%
+truck            +0    -0.0%    -0.1%
+bus              +0    +0.2%    +1.1%
+------------
+AVG (macro)     +19    +0.2%    +0.3%   (class-average)
+AVG (micro)     +19    +0.1%    -0.0%   (count-pooled overall)

@@ -30,12 +30,39 @@ class STrack(BaseTrack):
         self.cls = int(cls)
         self.tracklet_len = 0
 
-        # smooth_history stores the last 2 aggregated templates F^{t-2}, F^{t-1}
+        # Hyperparameters — env-overridable for ablation; defaults reproduce the validated config.
+        self.agg_option = os.environ.get('DARE_AGG', 'B')          # 'A' L1 Bias, 'B' Softmax
+        self.beta = float(os.environ.get('DARE_BETA', '4.0'))      # Inertia of Memory (Option A)
+        self.tau = float(os.environ.get('DARE_TAU', '0.5'))        # Softmax Temperature (Option B)
+        self.static_ema = float(os.environ.get('DARE_STATIC_EMA', '-1'))  # >=0: static-EMA control gamma
+        # Ablation knobs (meeting-notes-2026-07-16). agg_order = N, the number of historical
+        # aggregated templates in the memory window: N=2 default -> [t-2,t-1,t]; N=1 -> [t-1,t];
+        # general N -> [t-N,...,t-1,t]. Generalized 2026-07-28 to test N=5/N=10 (was hardcoded 1/2).
+        self.agg_order = int(os.environ.get('DARE_AGG_ORDER', '2'))
+        _sg = os.environ.get('DARE_STATIC_GAMMAS', '').strip()       # fixed weights -> static-EMA at N=order
+        self.static_gammas = np.array([float(x) for x in _sg.split(',')]) if _sg else None
+
+        # smooth_history stores the last N aggregated templates F^{t-N}..F^{t-1}
         # (NOT raw features — we store the output of update_features each step)
-        self.smooth_history = deque(maxlen=2)
-        self.scores = deque(maxlen=3)
+        self.smooth_history = deque(maxlen=self.agg_order)
+        self.scores = deque(maxlen=self.agg_order + 1)
         self.curr_feat = None
         self.smooth_feat = None
+
+        # Two-frame dynamic IoU gate (2026-07-28, Prof Farzad's idea — meeting-notes-2026-07-28
+        # item 8). Confirmed NOT a novelty claim (STC-SORT, Applied Sciences 2026, already ships
+        # a more general learned version of this over a much longer window — see
+        # novelty-triage-2026-07-28 §6). Implemented anyway as an honest ablation/negative-result.
+        # kf_history stores (mean, covariance) snapshots taken right after each KF correction
+        # (activate/re_activate/update), oldest -> newest, so a second "t-2 coast" prediction can
+        # be derived by propagating the OLDER snapshot two steps forward, ignoring the
+        # intermediate t-1 detection entirely. Disabled by default -- see BYTETracker.twoframe_gate.
+        self.kf_history = deque(maxlen=2)
+        # Reliability statistic for 'resid' mode: IoU between the KF prediction and the detection
+        # that was fused in at the track's most recent correction (same tau_shape statistic
+        # already computed for the lock-on feature, just persisted across frames). Defaults to
+        # 1.0 (assume consistent) until a correction has actually happened.
+        self.last_kf_iou = 1.0
 
         if feature is not None:
             feat_norm = feature / (np.linalg.norm(feature) + 1e-6)
@@ -43,26 +70,14 @@ class STrack(BaseTrack):
             self.smooth_history.append(feat_norm.copy())
             self.scores.append(score)
             self.curr_feat = feat_norm
-            
-        # Hyperparameters — env-overridable for ablation; defaults reproduce the validated config.
-        self.agg_option = os.environ.get('DARE_AGG', 'B')          # 'A' L1 Bias, 'B' Softmax
-        self.beta = float(os.environ.get('DARE_BETA', '4.0'))      # Inertia of Memory (Option A)
-        self.tau = float(os.environ.get('DARE_TAU', '0.5'))        # Softmax Temperature (Option B)
-        self.static_ema = float(os.environ.get('DARE_STATIC_EMA', '-1'))  # >=0: static-EMA control gamma
-        # Ablation knobs (meeting-notes-2026-07-16). Defaults reproduce the validated N=2 dynamic config.
-        self.agg_order = int(os.environ.get('DARE_AGG_ORDER', '2'))  # 2 = [t-2,t-1,t]; 1 = [t-1,t] dynamic
-        _sg = os.environ.get('DARE_STATIC_GAMMAS', '').strip()       # fixed weights -> static-EMA at N=2
-        self.static_gammas = np.array([float(x) for x in _sg.split(',')]) if _sg else None
+
     def _calculate_gammas(self):
         """
         Calculates dynamic weights based on the historical confidences.
-        Order 2 (default): 3-tap over [c_{t-2}, c_{t-1}, c_t] -> [gamma_2, gamma_1, gamma_0].
-        Order 1 (ablation): 2-tap over [c_{t-1}, c_t]        -> [gamma_1, gamma_0].
+        General N-tap: c_hist = [c_{t-N}, ..., c_{t-1}, c_t], oldest -> newest,
+        length self.agg_order + 1 (self.scores is already exactly this window).
         """
-        if self.agg_order == 1:
-            c_hist = [self.scores[-2], self.scores[-1]]        # [c_{t-1}, c_t]
-        else:
-            c_hist = [self.scores[0], self.scores[1], self.scores[2]]  # [c_{t-2}, c_{t-1}, c_t]
+        c_hist = list(self.scores)
 
         if self.agg_option == 'A':
             # Option A: L1 Normalization with Historical Bias
@@ -85,12 +100,13 @@ class STrack(BaseTrack):
 
     def update_features(self, new_feature, new_score):
         """
-        Replaces standard EMA with second-order dynamic aggregation (DARE-MOT).
-        F^t = gamma_0*f^t + gamma_1*F^{t-1} + gamma_2*F^{t-2}
+        Replaces standard EMA with N-th order dynamic aggregation (DARE-MOT).
+        F^t = gamma_0*f^t + sum_{i=1..N} gamma_i*F^{t-i}
         smooth_history stores the aggregated templates, not raw features.
         """
         self.scores.append(new_score)
         f_t = new_feature / (np.linalg.norm(new_feature) + 1e-6)  # normalize raw feature
+        N = self.agg_order
 
         if self.static_ema >= 0.0:
             # Static-EMA control (ablation): F^t = g*F^{t-1} + (1-g)*f^t
@@ -100,32 +116,21 @@ class STrack(BaseTrack):
                 g = self.static_ema
                 new_smooth = g * self.smooth_feat + (1.0 - g) * f_t
         elif self.static_gammas is not None:
-            # Static-EMA at N=2 (ablation): fixed-weight 3-tap over [F^{t-2}, F^{t-1}, f^t].
+            # Static-EMA at N=order (ablation): fixed-weight (N+1)-tap over [F^{t-N},...,F^{t-1}, f^t].
             # Same window as the dynamic path, but weights are constant (not confidence-derived) —
             # isolates the value of dynamic weighting at equal order.
-            if len(self.smooth_history) < 2:
+            if len(self.smooth_history) < N:
                 new_smooth = f_t.copy()
             else:
-                feats_array = np.array([self.smooth_history[0], self.smooth_history[1], f_t])
+                feats_array = np.array(list(self.smooth_history) + [f_t])
                 new_smooth = np.average(feats_array, axis=0, weights=self.static_gammas)
-        elif self.agg_order == 1:
-            # Order-1 dynamic aggregation (ablation): 2-tap over [F^{t-1}, f^t] with dynamic gammas.
-            if len(self.smooth_history) < 1 or len(self.scores) < 2:
-                new_smooth = f_t.copy()
-            else:
-                gammas = self._calculate_gammas()   # [gamma_1, gamma_0]
-                feats_array = np.array([self.smooth_history[-1], f_t])
-                new_smooth = np.average(feats_array, axis=0, weights=gammas)
-        elif len(self.smooth_history) < 2:
+        elif len(self.smooth_history) < N or len(self.scores) < N + 1:
             # Warmup: not enough history yet, use raw feature directly
             new_smooth = f_t.copy()
         else:
-            # Full second-order aggregation using aggregated historical templates
-            gammas = self._calculate_gammas()
-            F_t2 = self.smooth_history[0]  # F^{t-2} — aggregated template
-            F_t1 = self.smooth_history[1]  # F^{t-1} — aggregated template
-            feats_array = np.array([F_t2, F_t1, f_t])
-            # gammas = [gamma_2, gamma_1, gamma_0] — ordered oldest to newest
+            # Full N-th order aggregation using aggregated historical templates
+            gammas = self._calculate_gammas()  # [gamma_N,...,gamma_1,gamma_0], oldest -> newest
+            feats_array = np.array(list(self.smooth_history) + [f_t])  # [F^{t-N},...,F^{t-1}, f_t]
             new_smooth = np.average(feats_array, axis=0, weights=gammas)
             if getattr(STrack, 'dare_diag', False):
                 # how far the dynamic gate's newest-frame weight deviates from static EMA's implicit 0.9
@@ -172,6 +177,7 @@ class STrack(BaseTrack):
         # self.is_activated = True
         self.frame_id = frame_id
         self.start_frame = frame_id
+        self.kf_history.append((self.mean.copy(), self.covariance.copy(), self.frame_id))
 
     def re_activate(self, new_track, frame_id, new_id=False):
         self.mean, self.covariance = self.kalman_filter.update(
@@ -185,6 +191,7 @@ class STrack(BaseTrack):
             self.track_id = self.next_id()
         self.score = new_track.score
         self.cls = new_track.cls
+        self.kf_history.append((self.mean.copy(), self.covariance.copy(), self.frame_id))
 
     def update(self, new_track, frame_id):
         """
@@ -205,6 +212,41 @@ class STrack(BaseTrack):
 
         self.score = new_track.score
         self.cls = new_track.cls
+        self.kf_history.append((self.mean.copy(), self.covariance.copy(), self.frame_id))
+
+    def coast_box_two_steps(self, kalman_filter, current_frame_id, max_horizon=3):
+        """Two-frame dynamic IoU gate (2026-07-28): predicts the box at the CURRENT frame from
+        the KF state as it stood right after the t-2 correction -- propagated forward the actual
+        number of elapsed frames, ignoring every intermediate detection entirely -- for comparison
+        against the standard 1-step-ahead prediction used by the existing single-frame gate.
+
+        BUGFIX (found by an Opus brainstorm pass, 2026-07-28): the original version hard-coded
+        "propagate 2 steps" regardless of how stale kf_history[0] actually was. That's correct
+        for a continuously-matched track (corrected every frame, so kf_history[0] really is
+        exactly 2 frames back) but silently WRONG for any track that missed frames before its
+        last two corrections (lost/re-associated tracks, up to DARE_REASSOC_MAX/max_time_lost
+        frames stale) -- exactly the population where a second geometric opinion could plausibly
+        matter. Now propagates the true elapsed step count and bails (returns None, falling back
+        to the single-frame gate) if that exceeds max_horizon, since projecting an already-stale
+        state many steps forward stops being a meaningful "t-2 opinion" at all.
+
+        Returns (tlbr, covariance) for the coasted prediction, or (None, None) if this track
+        doesn't yet have a usable 2-correction-old snapshot."""
+        if len(self.kf_history) < 2:
+            return None, None
+        mean, cov, snap_frame = self.kf_history[0]  # state as of t-2, post-correction (oldest stored)
+        steps = current_frame_id - snap_frame
+        if steps < 1 or steps > max_horizon:
+            return None, None
+        mean, cov = mean.copy(), cov.copy()
+        for _ in range(steps):
+            mean, cov = kalman_filter.predict(mean, cov)
+        tlwh = mean[:4].copy()
+        tlwh[2] *= tlwh[3]
+        tlwh[:2] -= tlwh[2:] / 2
+        tlbr = tlwh.copy()
+        tlbr[2:] += tlbr[:2]
+        return tlbr, cov
 
     @property
     # @jit(nopython=True)
@@ -308,6 +350,33 @@ class BYTETracker(object):
         #   across IoU floor [0.03,0.10]), not edge-fished toward the off-cliff. Set 1.0 to disable.
         self.iou_gate = float(os.environ.get('DARE_IOU_GATE', '0.95'))
 
+        # Two-frame dynamic IoU gate (2026-07-28, Prof Farzad's idea — meeting-notes-2026-07-28
+        # item 8). Confirmed NOT a novelty claim: STC-SORT (Applied Sciences 2026) already ships
+        # a strictly more general learned version of this (4D cost volume over a 25-30 frame
+        # window, graph-attention softmax weights) on VisDrone — see novelty-triage-2026-07-28 §6.
+        # Implemented anyway per Alp's instruction, as an honest ablation entry regardless of sign.
+        #   DARE_TWOFRAME_GATE=1 enables; default 0 = exactly current (validated) behavior.
+        #   DARE_TWOFRAME_MODE: 'static' (fixed blend, DARE_TWOFRAME_ALPHA weights the t-1 term)
+        #     | 'dynamic' (default; softmax-weights the t-2 vs t-1 IoU term from the track's own
+        #     last two detection confidences [c_{t-2}, c_{t-1}], same pattern as the appearance
+        #     dynamic-aggregation's _calculate_gammas, temperature DARE_TWOFRAME_TAU).
+        self.twoframe_gate = os.environ.get('DARE_TWOFRAME_GATE', '0') == '1'
+        self.twoframe_mode = os.environ.get('DARE_TWOFRAME_MODE', 'dynamic')
+        self.twoframe_alpha = float(os.environ.get('DARE_TWOFRAME_ALPHA', '0.7'))
+        self.twoframe_tau = float(os.environ.get('DARE_TWOFRAME_TAU', '0.5'))
+        # Extended variant sweep (2026-07-28 evening, after an Opus brainstorm pass). See
+        # _two_frame_gate's docstring for what each knob controls; all default to values that
+        # only matter when the corresponding DARE_TWOFRAME_MODE is selected.
+        self.twoframe_tau2_gate = float(os.environ.get('DARE_TWOFRAME_TAU2_GATE', '-1'))  # 'max' mode; -1 = fall back to DARE_IOU_GATE
+        self.twoframe_resid_thresh = float(os.environ.get('DARE_TWOFRAME_RESID_THRESH', '0.3'))  # 'resid' mode
+        self.twoframe_age_min = int(os.environ.get('DARE_TWOFRAME_AGE_MIN', '10'))  # 'age' mode
+        self.twoframe_scale_min = float(os.environ.get('DARE_TWOFRAME_SCALE_MIN', '2500'))  # 'scale' mode, px^2
+        self.twoframe_disagree_delta = float(os.environ.get('DARE_TWOFRAME_DISAGREE_DELTA', '0.3'))  # 'disagree' mode
+        self.twoframe_diag_total = 0    # V9-lite diagnostic counters (printed iff DARE_DIAG=1)
+        self.twoframe_diag_coast_wins = 0
+        self.gate_reject_count = 0      # V2 diagnostic: how many pairs the IoU gate actually vetoes
+        self.gate_total_count = 0
+
         # Fix #1 (foreground-focused appearance) & Fix #3 (re-association age cap) — meeting-brief-2026-07-16.
         # All default to reproduce the current real-appearance baseline exactly (no change when unset).
         self.crop_shrink = float(os.environ.get('DARE_CROP_SHRINK', '0.0'))  # shrink box each side toward center before ReID crop (fraction 0..0.4)
@@ -399,6 +468,153 @@ class BYTETracker(object):
             cls_arr = np.array([d.cls for d in detections], dtype=np.int64)
             lam = np.where(np.isin(cls_arr, list(self.lambda_class_exclude)), 0.0, lam)
         return lam
+
+    def _two_frame_gate(self, strack_pool, detections, iou_t1):
+        """Two-frame dynamic IoU gate (2026-07-28, ablation only — see __init__ docstring above
+        for the novelty verdict; extended 2026-07-28 evening after an Opus brainstorm pass added
+        a bugfix (coast_box_two_steps now uses the true elapsed-frame horizon, not a hard-coded
+        2) and a wider variant sweep. Theoretical note carried from that pass: under a linear-
+        Gaussian constant-velocity model, the t-1 posterior is conditioned on a strict information
+        superset of the t-2 posterior (same prior + one more measurement), so t-1's 1-step
+        prediction is MMSE-optimal and no *blend* of (iou_t1, iou_t2) can beat iou_t1 alone unless
+        the t-1 measurement itself was an outlier / a CV-model violation -- which is exactly what
+        'resid' mode targets and the other modes (by construction) cannot detect.
+
+        DARE_TWOFRAME_MODE:
+          'dynamic' (default) -- per-track softmax over [c_{t-2},c_{t-1}] weights iou_t1 vs iou_t2
+              (mirrors the appearance dynamic-aggregation's _calculate_gammas).
+          'static'  -- fixed blend, DARE_TWOFRAME_ALPHA weights iou_t1 (alpha=0 -> pure iou_t2,
+              alpha=1 -> pure iou_t1; sweeping this closes the whole convex-combination family).
+          'min'     -- OR-gate / "take the most optimistic": elementwise min(iou_t1, iou_t2) --
+              relaxes the validated gate (can only re-admit pairs it used to reject).
+          'max'     -- AND-gate / "take the most conservative": rejects if iou_t1 exceeds the
+              main gate OR iou_t2 exceeds DARE_TWOFRAME_TAU2_GATE (defaults to the same value as
+              DARE_IOU_GATE -- an uncalibrated but honest starting point; strictly tightens the gate).
+          'cov'     -- inverse-covariance-trace weighted blend (principled-looking, but the coast
+              path always has strictly more accumulated process noise than the 1-step path, so
+              this is predicted to degenerate to a near-constant effective alpha -- included to
+              pre-empt "did you weight by the KF's own uncertainty" rather than to win).
+          'resid'   -- per-track HARD selection: use iou_t2 for the whole row if the track's most
+              recent correction was itself a kinematic outlier (last_kf_iou < DARE_TWOFRAME_RESID_
+              THRESH, same statistic already used for the lock-on feature), else iou_t1. The only
+              mode that fires in the theoretically-live regime above.
+          'age'     -- only tracks with tracklet_len >= DARE_TWOFRAME_AGE_MIN get blended with
+              iou_t2 (younger tracks' CV velocity estimate hasn't converged, so their coast is
+              worse than usual); younger tracks stay pure iou_t1.
+          'scale'   -- only tracks whose own box area exceeds DARE_TWOFRAME_SCALE_MIN get blended
+              with iou_t2 (a fixed pixel coast-displacement is a bigger fraction of a small box's
+              own size, collapsing its IoU faster -- same mechanism as the project's scale-
+              conditional CMC finding); smaller tracks stay pure iou_t1.
+          'disagree'-- veto (force-reject) any pair where |iou_t1 - iou_t2| > DARE_TWOFRAME_
+              DISAGREE_DELTA, treating strong disagreement between the two signals as an
+              uncertainty flag rather than fusing them into a point estimate.
+
+        Tracks without a usable t-2 snapshot (too young, or too stale -- see coast_box_two_steps'
+        max_horizon bail-out) fall back to iou_t1 alone in every mode."""
+        if len(strack_pool) == 0 or len(detections) == 0:
+            return iou_t1
+
+        tlbrs_t2 = []
+        covs_t2 = []
+        have_t2 = np.zeros(len(strack_pool), dtype=bool)
+        for i, st in enumerate(strack_pool):
+            box, cov2 = st.coast_box_two_steps(self.kalman_filter, self.frame_id)
+            if box is not None:
+                tlbrs_t2.append(box)
+                covs_t2.append(cov2)
+                have_t2[i] = True
+            else:
+                tlbrs_t2.append(st.tlbr)  # placeholder; masked out by have_t2 below
+                covs_t2.append(None)
+
+        iou_t2 = matching.iou_distance(tlbrs_t2, [d.tlbr for d in detections])
+        combined = iou_t1.copy()
+        mode = self.twoframe_mode
+
+        if mode == 'static':
+            a = self.twoframe_alpha
+            combined[have_t2] = a * iou_t1[have_t2] + (1.0 - a) * iou_t2[have_t2]
+
+        elif mode == 'min':
+            combined[have_t2] = np.minimum(iou_t1[have_t2], iou_t2[have_t2])
+
+        elif mode == 'max':
+            tau2 = self.twoframe_tau2_gate if self.twoframe_tau2_gate >= 0 else self.iou_gate
+            rows = np.where(have_t2)[0]
+            for i in rows:
+                fails = iou_t2[i] > tau2
+                combined[i] = np.where(fails, np.inf, iou_t1[i])
+
+        elif mode == 'disagree':
+            rows = np.where(have_t2)[0]
+            for i in rows:
+                disagree = np.abs(iou_t1[i] - iou_t2[i]) > self.twoframe_disagree_delta
+                combined[i] = np.where(disagree, np.inf, iou_t1[i])
+
+        elif mode == 'cov':
+            for i, st in enumerate(strack_pool):
+                if not have_t2[i]:
+                    continue
+                p1 = float(np.trace(st.covariance[:2, :2]))
+                p2 = float(np.trace(covs_t2[i][:2, :2]))
+                w1 = 1.0 / max(p1, 1e-9)
+                w2 = 1.0 / max(p2, 1e-9)
+                a = w1 / (w1 + w2)  # weight on iou_t1
+                combined[i] = a * iou_t1[i] + (1.0 - a) * iou_t2[i]
+
+        elif mode == 'resid':
+            thresh = self.twoframe_resid_thresh
+            for i, st in enumerate(strack_pool):
+                if not have_t2[i]:
+                    continue
+                if st.last_kf_iou < thresh:
+                    combined[i] = iou_t2[i]
+                # else: leave as iou_t1 (already the default in `combined`)
+
+        elif mode == 'age':
+            min_len = self.twoframe_age_min
+            a = self.twoframe_alpha
+            for i, st in enumerate(strack_pool):
+                if not have_t2[i] or st.tracklet_len < min_len:
+                    continue
+                combined[i] = a * iou_t1[i] + (1.0 - a) * iou_t2[i]
+
+        elif mode == 'scale':
+            min_area = self.twoframe_scale_min
+            a = self.twoframe_alpha
+            for i, st in enumerate(strack_pool):
+                if not have_t2[i]:
+                    continue
+                tlwh = st.tlwh
+                area = tlwh[2] * tlwh[3]
+                if area < min_area:
+                    continue
+                combined[i] = a * iou_t1[i] + (1.0 - a) * iou_t2[i]
+
+        else:  # 'dynamic' (default)
+            for i, st in enumerate(strack_pool):
+                if not have_t2[i]:
+                    continue
+                c_hist = list(st.scores)[-2:]  # [c_{t-2}, c_{t-1}], oldest -> newest
+                if len(c_hist) < 2:
+                    continue
+                w = np.exp(np.array(c_hist) / self.twoframe_tau)
+                w = w / w.sum()
+                # w[1] weights the newer (t-1-based, iou_t1) term; w[0] weights the older
+                # (t-2-based coast, iou_t2) term.
+                combined[i] = w[1] * iou_t1[i] + w[0] * iou_t2[i]
+
+        # V9-lite diagnostic (DARE_DIAG=1 only): per-row, does the coast prediction's best
+        # candidate column look more confident than the standard prediction's? A cheap proxy
+        # for "how often would trusting iou_t2 change anything," not a matched-pair comparison.
+        if self.dare_diag:
+            rows = np.where(have_t2)[0]
+            for i in rows:
+                self.twoframe_diag_total += 1
+                if iou_t2[i].min() < iou_t1[i].min():
+                    self.twoframe_diag_coast_wins += 1
+
+        return combined
 
     def _extract_features_osnet(self, detections, raw_frame):
         """ReID features via a real person-ReID embedding (torchreid OSNet).
@@ -539,9 +755,18 @@ class BYTETracker(object):
         lam = self._gated_lambda(detections)  # scalar, or per-detection [n_det] when size-gated
         dists = (1.0 - lam) * iou_dists + lam * reid_dists
 
+        # Two-frame dynamic IoU gate (ablation, default off — see DARE_TWOFRAME_GATE above).
+        gate_dists = raw_iou_dists
+        if self.twoframe_gate:
+            gate_dists = self._two_frame_gate(strack_pool, detections, raw_iou_dists)
+
         # IoU-feasibility gate: appearance may re-rank but not rescue non-overlapping pairs.
         if self.iou_gate < 1.0:
-            dists[raw_iou_dists > self.iou_gate] = np.inf
+            reject_mask = gate_dists > self.iou_gate
+            if self.dare_diag:
+                self.gate_reject_count += int(reject_mask.sum())
+                self.gate_total_count += reject_mask.size
+            dists[reject_mask] = np.inf
 
         matches, u_track, u_detection = matching.linear_assignment(dists, thresh=self.args.match_thresh)
 
@@ -563,6 +788,7 @@ class BYTETracker(object):
                 union = p[2]*p[3] + d[2]*d[3] - inter
                 kf_iou = inter / (union + 1e-6)
                 is_kinematic_divergence = kf_iou < 0.3  # tau_shape threshold
+                track.last_kf_iou = kf_iou  # persisted for the two-frame gate's 'resid' mode
 
                 if det.curr_feat is not None:
                     should_update = not self.lock_on or (det.score >= 0.4 and not is_kinematic_divergence)
@@ -607,6 +833,7 @@ class BYTETracker(object):
                 union = p[2]*p[3] + d[2]*d[3] - inter
                 kf_iou = inter / (union + 1e-6)
                 is_kinematic_divergence = kf_iou < 0.3  # tau_shape threshold
+                track.last_kf_iou = kf_iou  # persisted for the two-frame gate's 'resid' mode
 
                 if det.curr_feat is not None:
                     should_update = not self.lock_on or (det.score >= 0.4 and not is_kinematic_divergence)
@@ -674,8 +901,14 @@ class BYTETracker(object):
             return
         devs = STrack.gamma_devs
         mean_dev = float(np.mean(devs)) if devs else 0.0
+        coast_rate = (self.twoframe_diag_coast_wins / self.twoframe_diag_total
+                      if self.twoframe_diag_total else 0.0)
+        reject_rate = (self.gate_reject_count / self.gate_total_count
+                       if self.gate_total_count else 0.0)
         print(f"[DARE_DIAG] seq={seq_name or '?'} lock_fires={self.lock_fires} "
-              f"gamma_dev_mean={mean_dev:.4f} (n={len(devs)})")
+              f"gamma_dev_mean={mean_dev:.4f} (n={len(devs)}) "
+              f"twoframe_coast_win_rate={coast_rate:.4f} (n={self.twoframe_diag_total}) "
+              f"gate_reject_rate={reject_rate:.4f} (rejects={self.gate_reject_count}/{self.gate_total_count})")
 
 
 def joint_stracks(tlista, tlistb):
