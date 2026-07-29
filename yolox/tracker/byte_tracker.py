@@ -377,6 +377,18 @@ class BYTETracker(object):
         self.gate_reject_count = 0      # V2 diagnostic: how many pairs the IoU gate actually vetoes
         self.gate_total_count = 0
 
+        # Class-blocked association (2026-07-29, validity check raised in novelty-triage-2026-07-28
+        # -- byte_tracker's association has always been class-agnostic by design (see STrack.cls
+        # comment above), but mmtracking/BoxMOT default to class-BLOCKED cost (mmtracking's
+        # cate_cost, PR #548: (1-match)*1e6 added into the joint Hungarian cost) -- the field's
+        # actual default on multi-class benchmarks. Both arms (DARE and ByteTrack) share whichever
+        # mode is active so the DELTA stays fair either way; this knob lets us re-measure the
+        # headline under the field-standard class-blocked setting instead of just asserting the
+        # agnostic delta is fair.
+        #   DARE_CLASS_BLOCK=1 forbids cross-class matches in every association stage (inf cost,
+        #   same mechanism as the IoU-feasibility gate). Default 0 = unchanged agnostic behavior.
+        self.class_block = os.environ.get('DARE_CLASS_BLOCK', '0') == '1'
+
         # Fix #1 (foreground-focused appearance) & Fix #3 (re-association age cap) — meeting-brief-2026-07-16.
         # All default to reproduce the current real-appearance baseline exactly (no change when unset).
         self.crop_shrink = float(os.environ.get('DARE_CROP_SHRINK', '0.0'))  # shrink box each side toward center before ReID crop (fraction 0..0.4)
@@ -468,6 +480,20 @@ class BYTETracker(object):
             cls_arr = np.array([d.cls for d in detections], dtype=np.int64)
             lam = np.where(np.isin(cls_arr, list(self.lambda_class_exclude)), 0.0, lam)
         return lam
+
+    def _class_block(self, dists, tracks, dets):
+        """In-place cross-class veto (DARE_CLASS_BLOCK=1 only): dists[i,j] = inf wherever
+        track i's class differs from detection j's class. Unknown class (-1, the 5-col
+        no-class path) never blocks -- doesn't occur on the MC benchmark this targets.
+        No-op (returns dists unchanged) unless self.class_block is set."""
+        if not self.class_block or len(tracks) == 0 or len(dets) == 0:
+            return dists
+        t_cls = np.array([t.cls for t in tracks], dtype=np.int64)
+        d_cls = np.array([d.cls for d in dets], dtype=np.int64)
+        mismatch = t_cls[:, None] != d_cls[None, :]
+        known = (t_cls[:, None] != -1) & (d_cls[None, :] != -1)
+        dists[mismatch & known] = np.inf
+        return dists
 
     def _two_frame_gate(self, strack_pool, detections, iou_t1):
         """Two-frame dynamic IoU gate (2026-07-28, ablation only — see __init__ docstring above
@@ -768,6 +794,8 @@ class BYTETracker(object):
                 self.gate_total_count += reject_mask.size
             dists[reject_mask] = np.inf
 
+        dists = self._class_block(dists, strack_pool, detections)
+
         matches, u_track, u_detection = matching.linear_assignment(dists, thresh=self.args.match_thresh)
 
         for itracked, idet in matches:
@@ -814,6 +842,7 @@ class BYTETracker(object):
             self._extract_features(detections_second, raw_frame)
         r_tracked_stracks = [strack_pool[i] for i in u_track if strack_pool[i].state == TrackState.Tracked]
         dists = matching.iou_distance(r_tracked_stracks, detections_second)
+        dists = self._class_block(dists, r_tracked_stracks, detections_second)
         matches, u_track, u_detection_second = matching.linear_assignment(dists, thresh=0.5)
         for itracked, idet in matches:
             track = r_tracked_stracks[itracked]
@@ -857,6 +886,7 @@ class BYTETracker(object):
         dists = matching.iou_distance(unconfirmed, detections)
         if not self.args.mot20:
             dists = matching.fuse_score(dists, detections)
+        dists = self._class_block(dists, unconfirmed, detections)
         matches, u_unconfirmed, u_detection = matching.linear_assignment(dists, thresh=0.7)
         for itracked, idet in matches:
             unconfirmed[itracked].update(detections[idet], self.frame_id)

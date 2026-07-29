@@ -61,6 +61,13 @@ class GMC:
 
         self.initializedFirstFrame = False
 
+        # Residual instrumentation (scale-conditional CMC gate design, 2026-07-29).
+        # None until the first non-initial applySparseOptFlow call with a valid fit.
+        self.last_resid_px = None
+        self.last_resid_p90_px = None
+        self.last_inlier_ratio = None
+        self.last_trans_px = None
+
     def apply(self, raw_frame, detections=None):
         if self.method in ('orb', 'sift'):
             return self.applyFeaures(raw_frame, detections)
@@ -185,8 +192,9 @@ class GMC:
         if (np.size(prevPoints, 0) > 4) and (np.size(prevPoints, 0) == np.size(prevPoints, 0)):
             H, inliesrs = cv2.estimateAffinePartial2D(prevPoints, currPoints, cv2.RANSAC)
 
-            # Handle downscale
-            if self.downscale > 1.0:
+            if H is None:
+                H = np.eye(2, 3)
+            elif self.downscale > 1.0:
                 H[0, 2] *= self.downscale
                 H[1, 2] *= self.downscale
         else:
@@ -238,8 +246,28 @@ class GMC:
         currPoints = np.array(currPoints)
 
         # Find rigid matrix
+        self.last_resid_px = None
+        self.last_resid_p90_px = None
+        self.last_inlier_ratio = None
+        self.last_trans_px = None
         if (np.size(prevPoints, 0) > 4) and (np.size(prevPoints, 0) == np.size(prevPoints, 0)):
-            H, inliesrs = cv2.estimateAffinePartial2D(prevPoints, currPoints, cv2.RANSAC)
+            H, inliers = cv2.estimateAffinePartial2D(prevPoints, currPoints, cv2.RANSAC)
+
+            if H is None:
+                # RANSAC failed to find a model (degenerate point config) -> identity, no motion.
+                H = np.eye(2, 3)
+            else:
+                # Residual instrumentation (scale-conditional CMC gate design,
+                # Projects/Dare_Mot/cmc-gate-design-2026-07-29.md): reprojection error of the
+                # inlier set under the fitted H, in DOWNSCALED pixel units (pre-rescale below).
+                inlier_mask = inliers.ravel() > 0
+                if inlier_mask.sum() > 0:
+                    proj = prevPoints @ H[:2, :2].T + H[:2, 2]
+                    res = np.linalg.norm(proj - currPoints, axis=1)[inlier_mask]
+                    self.last_resid_px = float(np.median(res)) * self.downscale
+                    self.last_resid_p90_px = float(np.percentile(res, 90)) * self.downscale
+                    self.last_inlier_ratio = float(inlier_mask.mean())
+                    self.last_trans_px = float(np.linalg.norm(H[:2, 2])) * self.downscale
 
             # Handle downscale
             if self.downscale > 1.0:

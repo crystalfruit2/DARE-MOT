@@ -196,3 +196,10 @@ _ped_gt/
 # Path-1 baseline reference clones (large; vendor only adapter files into baselines/)
 _baselines/
 _mc_*.log
+
+# CMC warp-SNR gate (G2) decisive experiment — raw residual logs + switch-record
+# join output, regenerable via _cmc_residual_pass.py / _cmc_idsw_join.py; keep the
+# scripts, numbers live in the vault (experiment-log.md 2026-07-29).
+_cmc_residual_logs/
+_cmc_gate_decisive/
+_cmc_*.log
