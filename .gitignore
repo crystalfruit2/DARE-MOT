@@ -186,3 +186,8 @@ _trackeval/trackers/
 # _build_ped_gt.py from the raw VisDrone-MOT val annotations; keep the script.
 _ped_gt/
 /reid_train
+
+# External baseline tracker clones (BoT-SORT, Deep-OC-SORT, OC_SORT) — each is its
+# own git repo, cloned for controlled comparison in Path 1; not our code, re-clone
+# via their own READMEs if needed.
+_baselines/
