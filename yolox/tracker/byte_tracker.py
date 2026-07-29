@@ -14,6 +14,8 @@ from yolox.tracker import matching
 from .basetrack import BaseTrack, TrackState
 
 class STrack(BaseTrack):
+    # Overwritten by BYTETracker.__init__ to match its own DARE_KF_MODEL choice
+    # (mirrors the STrack.dare_diag / STrack.gamma_devs pattern below).
     shared_kalman = KalmanFilter()
     def __init__(self, tlwh, score, feature=None, cls=-1):
 
@@ -148,7 +150,10 @@ class STrack(BaseTrack):
     def predict(self):
         mean_state = self.mean.copy()
         if self.state != TrackState.Tracked:
-            mean_state[7] = 0
+            mean_state[7] = 0  # vh
+            if len(mean_state) > 8:
+                mean_state[11] = 0  # ah (CA model only) -- same rationale: don't let an
+                                     # unobserved height derivative run a lost track's box to 0
         self.mean, self.covariance = self.kalman_filter.predict(mean_state, self.covariance)
 
     @staticmethod
@@ -159,6 +164,8 @@ class STrack(BaseTrack):
             for i, st in enumerate(stracks):
                 if st.state != TrackState.Tracked:
                     multi_mean[i][7] = 0
+                    if multi_mean.shape[1] > 8:
+                        multi_mean[i][11] = 0
             multi_mean, multi_covariance = STrack.shared_kalman.multi_predict(multi_mean, multi_covariance)
             for i, (mean, cov) in enumerate(zip(multi_mean, multi_covariance)):
                 stracks[i].mean = mean
@@ -315,7 +322,18 @@ class BYTETracker(object):
         self.det_thresh = args.track_thresh + 0.1
         self.buffer_size = int(frame_rate / 30.0 * args.track_buffer)
         self.max_time_lost = self.buffer_size
-        self.kalman_filter = KalmanFilter()
+
+        # Motion model (2026-07-29, Prof Farzad follow-up on the two-frame IoU gate):
+        # 'cv' (default) = original constant-velocity filter. 'ca' = constant-acceleration --
+        # under CV the t-1 prediction is provably MMSE-optimal and the t-2 point is redundant
+        # (see _two_frame_gate docstring); under CA the state has an acceleration DOF that a
+        # single prior point can't identify, so this is a genuinely different question, not a
+        # repeat of the CV negative result. Both trackers/STracks in a run share this choice
+        # (STrack.shared_kalman below), so DARE and ByteTrack stay comparable when both are
+        # scored under the same DARE_KF_MODEL.
+        self.kf_motion_model = os.environ.get('DARE_KF_MODEL', 'cv')
+        self.kalman_filter = KalmanFilter(motion_model=self.kf_motion_model)
+        STrack.shared_kalman = self.kalman_filter
 
         # Ablation knobs (env-overridable; defaults reproduce validated behavior)
         self.lock_on = os.environ.get('DARE_LOCK', '1') == '1'     # kinematic/confidence hard lock

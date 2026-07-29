@@ -24,33 +24,50 @@ class KalmanFilter(object):
     """
     A simple Kalman filter for tracking bounding boxes in image space.
 
-    The 8-dimensional state space
+    Two motion models, selected via `motion_model`:
 
-        x, y, a, h, vx, vy, va, vh
+      'cv' (default) -- constant velocity. The 8-dimensional state space
+          x, y, a, h, vx, vy, va, vh
+      'ca' -- constant acceleration (2026-07-29, Prof Farzad follow-up on the
+          two-frame IoU gate: does a t-2/t-1/t coast prediction help once the
+          filter's own motion model has a use for the third point?). The
+          12-dimensional state space
+          x, y, a, h, vx, vy, va, vh, ax, ay, aa, ah
 
-    contains the bounding box center position (x, y), aspect ratio a, height h,
-    and their respective velocities.
-
-    Object motion follows a constant velocity model. The bounding box location
+    Either way (x, y) is the bounding box center position, a the aspect ratio,
+    h the height, and the rest their derivatives. The bounding box location
     (x, y, a, h) is taken as direct observation of the state space (linear
     observation model).
 
     """
 
-    def __init__(self):
+    def __init__(self, motion_model='cv'):
         ndim, dt = 4, 1.
+        if motion_model not in ('cv', 'ca'):
+            raise ValueError("motion_model must be 'cv' or 'ca'")
+        self.motion_model = motion_model
+        self.order = 2 if motion_model == 'ca' else 1  # # of derivative blocks beyond position
+        state_dim = ndim * (1 + self.order)
 
         # Create Kalman filter model matrices.
-        self._motion_mat = np.eye(2 * ndim, 2 * ndim)
+        #   pos  += vel*dt [+ 0.5*acc*dt^2 if CA]
+        #   vel  += acc*dt                [CA only]
+        #   acc  unchanged                [CA only]
+        self._motion_mat = np.eye(state_dim, state_dim)
         for i in range(ndim):
             self._motion_mat[i, ndim + i] = dt
-        self._update_mat = np.eye(ndim, 2 * ndim)
+        if self.order == 2:
+            for i in range(ndim):
+                self._motion_mat[i, 2 * ndim + i] = 0.5 * dt * dt
+                self._motion_mat[ndim + i, 2 * ndim + i] = dt
+        self._update_mat = np.eye(ndim, state_dim)
 
         # Motion and observation uncertainty are chosen relative to the current
         # state estimate. These weights control the amount of uncertainty in
         # the model. This is a bit hacky.
         self._std_weight_position = 1. / 20
         self._std_weight_velocity = 1. / 160
+        self._std_weight_acceleration = 1. / 160  # CA only; same scale as velocity noise
 
     def initiate(self, measurement):
         """Create track from unassociated measurement.
@@ -64,15 +81,14 @@ class KalmanFilter(object):
         Returns
         -------
         (ndarray, ndarray)
-            Returns the mean vector (8 dimensional) and covariance matrix (8x8
-            dimensional) of the new track. Unobserved velocities are initialized
-            to 0 mean.
+            Returns the mean vector (8- or 12-dimensional, depending on
+            motion_model) and covariance matrix of the new track. Unobserved
+            velocities/accelerations are initialized to 0 mean.
 
         """
         mean_pos = measurement
         mean_vel = np.zeros_like(mean_pos)
-        mean = np.r_[mean_pos, mean_vel]
-
+        parts = [mean_pos, mean_vel]
         std = [
             2 * self._std_weight_position * measurement[3],
             2 * self._std_weight_position * measurement[3],
@@ -82,6 +98,15 @@ class KalmanFilter(object):
             10 * self._std_weight_velocity * measurement[3],
             1e-5,
             10 * self._std_weight_velocity * measurement[3]]
+        if self.order == 2:
+            mean_acc = np.zeros_like(mean_pos)
+            parts.append(mean_acc)
+            std += [
+                10 * self._std_weight_acceleration * measurement[3],
+                10 * self._std_weight_acceleration * measurement[3],
+                1e-5,
+                10 * self._std_weight_acceleration * measurement[3]]
+        mean = np.r_[tuple(parts)]
         covariance = np.diag(np.square(std))
         return mean, covariance
 
@@ -91,11 +116,11 @@ class KalmanFilter(object):
         Parameters
         ----------
         mean : ndarray
-            The 8 dimensional mean vector of the object state at the previous
-            time step.
+            The mean vector of the object state at the previous time step
+            (8-dim for 'cv', 12-dim for 'ca').
         covariance : ndarray
-            The 8x8 dimensional covariance matrix of the object state at the
-            previous time step.
+            The covariance matrix of the object state at the previous time
+            step.
 
         Returns
         -------
@@ -114,7 +139,15 @@ class KalmanFilter(object):
             self._std_weight_velocity * mean[3],
             1e-5,
             self._std_weight_velocity * mean[3]]
-        motion_cov = np.diag(np.square(np.r_[std_pos, std_vel]))
+        std_list = std_pos + std_vel
+        if self.order == 2:
+            std_acc = [
+                self._std_weight_acceleration * mean[3],
+                self._std_weight_acceleration * mean[3],
+                1e-5,
+                self._std_weight_acceleration * mean[3]]
+            std_list = std_list + std_acc
+        motion_cov = np.diag(np.square(np.array(std_list)))
 
         #mean = np.dot(self._motion_mat, mean)
         mean = np.dot(mean, self._motion_mat.T)
@@ -178,7 +211,15 @@ class KalmanFilter(object):
             self._std_weight_velocity * mean[:, 3],
             1e-5 * np.ones_like(mean[:, 3]),
             self._std_weight_velocity * mean[:, 3]]
-        sqr = np.square(np.r_[std_pos, std_vel]).T
+        parts = std_pos + std_vel
+        if self.order == 2:
+            std_acc = [
+                self._std_weight_acceleration * mean[:, 3],
+                self._std_weight_acceleration * mean[:, 3],
+                1e-5 * np.ones_like(mean[:, 3]),
+                self._std_weight_acceleration * mean[:, 3]]
+            parts = parts + std_acc
+        sqr = np.square(np.vstack(parts)).T
 
         motion_cov = []
         for i in range(len(mean)):
