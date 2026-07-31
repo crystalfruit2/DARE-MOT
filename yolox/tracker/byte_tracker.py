@@ -387,6 +387,24 @@ class BYTETracker(object):
         self.density_radius = float(os.environ.get('DARE_DENSITY_RADIUS', '3.0'))
         self.density_strength = float(os.environ.get('DARE_DENSITY_STRENGTH', '2.0'))
 
+        # Adaptive Weighting (AW) comparison arm (2026-07-31, same day as the density gate).
+        # A round-2 lit-check brainstorm flagged a risk: Deep OC-SORT Sec 3.4's AW already
+        # measures per-instance appearance ambiguity directly (best-vs-second-best margin in
+        # the appearance cost matrix, in-frame) -- local crowding (the density gate's signal)
+        # may just be a cruder PROXY for the same thing. This implements AW's per-detection
+        # half (z_diff^det, Eq. 4) as its own independent gate so it can be tested alone and
+        # composed with the density gate, to see whether either is redundant with the other.
+        #   margin[n] = (2nd-smallest reid_dists in column n) - (smallest reid_dists in column n)
+        #   -- a small margin means the best appearance match for detection n is nearly tied
+        #   with the next-best track, i.e. appearance is ambiguous for this detection right now;
+        #   a large margin means it's unambiguous. AW trusts appearance more when unambiguous.
+        #   DARE_AW_GATE='boost' -> margin pulls lambda UP toward reid_lambda (unambiguous
+        #     detections get more appearance weight). 'none' (default) = no-op.
+        #   DARE_AW_STRENGTH: saturation scale for margin -> [0,1] factor (aw_factor =
+        #     1 - exp(-margin / strength)), same functional form as the density factor.
+        self.aw_gate = os.environ.get('DARE_AW_GATE', 'none')  # 'none' | 'boost'
+        self.aw_strength = float(os.environ.get('DARE_AW_STRENGTH', '0.15'))
+
         # IoU-feasibility gate on the first-pass fused cost. Decomposition (2026-07-20) showed
         # the appearance term manufactures FP by letting a low ReID distance pull a
         # geometrically-implausible (low-IoU) pair under match_thresh. This masks any pair whose
@@ -519,22 +537,44 @@ class BYTETracker(object):
         n_neighbors = within.sum(axis=1).astype(np.float32)
         return 1.0 - np.exp(-n_neighbors / self.density_strength)
 
-    def _gated_lambda(self, detections):
+    def _aw_factor(self, reid_dists):
+        """Per-detection [0,1] appearance-ambiguity factor, adapted from Deep OC-SORT's
+        Adaptive Weighting (arXiv 2302.11813 Sec 3.4, Eq. 4-5, z_diff^det half only --
+        this pipeline's lambda is per-detection/column, not per-(track,detection)-pair).
+        reid_dists is a COST matrix [n_track, n_det] (lower = more similar). For each
+        detection column, margin = (2nd-smallest cost) - (smallest cost): a small margin
+        means the best appearance match is nearly tied with the next-best track (ambiguous
+        right now); a large margin means it's unambiguous. Columns with <2 tracks get
+        margin 0 (no basis for a margin -- unlike the original AW, which clips at ULONG_MAX
+        wrapped in min(...,eps), then treated as globally trustworthy; here a lone candidate
+        is not classified as trustworthy purely for lacking a competitor).
+        factor = 1 - exp(-margin / aw_strength), same functional form as the density factor."""
+        if reid_dists.shape[0] < 2:
+            return np.zeros(reid_dists.shape[1], dtype=np.float32)
+        sorted_costs = np.sort(reid_dists, axis=0)  # ascending per column
+        margin = sorted_costs[1] - sorted_costs[0]
+        return 1.0 - np.exp(-margin / self.aw_strength)
+
+    def _gated_lambda(self, detections, reid_dists=None):
         """Appearance weight for the fused cost. Constant self.reid_lambda unless
-        DARE_LAMBDA_GATE='size', DARE_LAMBDA_CLASS_EXCLUDE, and/or DARE_DENSITY_GATE is set,
-        in which case a per-detection [n_det] vector is returned (broadcasts over the
-        columns/detections of the cost matrix):
+        DARE_LAMBDA_GATE='size', DARE_LAMBDA_CLASS_EXCLUDE, DARE_DENSITY_GATE, and/or
+        DARE_AW_GATE is set, in which case a per-detection [n_det] vector is returned
+        (broadcasts over the columns/detections of the cost matrix):
           size gate: tiny targets (area<=gate_lo) get lambda 0 (IoU only — no reliable
             identity in a few-pixel crop); large targets (area>=gate_hi) get the full
             lambda; linear ramp between. gate_hi<=gate_lo => hard gate at gate_lo.
           class-exclude: forces lambda 0 for detections whose class is in the exclude
             set, on top of (composes with) whatever the size gate already produced.
           density gate: pulls lambda toward reid_lambda ('boost') or toward 0 ('suppress')
-            in proportion to local crowding, on top of (composes with) the above."""
+            in proportion to local crowding, on top of (composes with) the above.
+          AW gate: pulls lambda toward reid_lambda in proportion to how unambiguous the
+            current frame's best appearance match is for that detection (see _aw_factor),
+            on top of (composes with) the above -- requires reid_dists to be passed."""
         if len(detections) == 0:
             return self.reid_lambda
         needs_vector = (self.lambda_gate == 'size' or self.lambda_class_exclude
-                        or self.density_gate in ('boost', 'suppress'))
+                        or self.density_gate in ('boost', 'suppress')
+                        or self.aw_gate == 'boost')
         if not needs_vector:
             return self.reid_lambda
         if self.lambda_gate == 'size':
@@ -555,6 +595,9 @@ class BYTETracker(object):
                 lam = lam + (self.reid_lambda - lam) * density_factor
             else:  # 'suppress'
                 lam = lam * (1.0 - density_factor)
+        if self.aw_gate == 'boost' and reid_dists is not None:
+            aw_factor = self._aw_factor(reid_dists)
+            lam = lam + (self.reid_lambda - lam) * aw_factor
         return lam
 
     def _class_block(self, dists, tracks, dets):
@@ -854,7 +897,7 @@ class BYTETracker(object):
         # embedding_distance_safe falls back to cost=1.0 for any track/det without features,
         # so the fused matrix degrades gracefully to IoU-only for those pairs.
         reid_dists = matching.embedding_distance_safe(strack_pool, detections)
-        lam = self._gated_lambda(detections)  # scalar, or per-detection [n_det] when size-gated
+        lam = self._gated_lambda(detections, reid_dists)  # scalar, or per-detection [n_det] when gated
         dists = (1.0 - lam) * iou_dists + lam * reid_dists
 
         # Two-frame dynamic IoU gate (ablation, default off — see DARE_TWOFRAME_GATE above).
