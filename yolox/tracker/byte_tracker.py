@@ -357,6 +357,36 @@ class BYTETracker(object):
             int(c) for c in os.environ.get('DARE_LAMBDA_CLASS_EXCLUDE', '').split(',') if c.strip() != ''
         )
 
+        # Density-gated appearance fusion (2026-07-31, "Dynamic Fusion Gate" -- Idea-Garden,
+        # planted 2026-07-13). Lit-checked before implementing: the appearance-ambiguity half of
+        # the original idea is Deep OC-SORT's Adaptive Weighting (arXiv 2302.11813 Sec 3.4, prior
+        # art, dropped). The local-density half survives a lit check against the two closest
+        # candidates -- MAAT (density-aware association, doi 10.3390/jmse14080738) uses a GLOBAL
+        # frame-level ratio (active tracks / high-confidence detections) as a binary switch
+        # between two purely geometric cost formulas, never touching appearance; STC-SORT's
+        # graph network (Applied Sciences 16(2):1062) has no explicit local-density input, only an
+        # undefined "V_scene" placeholder. Neither is the same mechanism as what's implemented
+        # here: a per-detection LOCAL neighbor count (scale-normalized by the detection's own box
+        # diagonal, so it means the same thing for a tiny pedestrian and a large truck) that
+        # continuously modulates the appearance weight on top of (composes with) the size gate.
+        #
+        # Untested hypothesis, unresolved direction -- crowding could argue either way: appearance
+        # might help MORE in dense scenes (geometric/IoU cost alone can't disambiguate near-
+        # identical nearby boxes) or HURT more (this project's own uav0000086 crowd-scene evidence
+        # suggests dense scenes are exactly where appearance/CMC failure modes concentrate). Both
+        # directions are implemented so this can be swept rather than assumed.
+        #   DARE_DENSITY_GATE='boost'    -> density pulls lambda UP toward reid_lambda (crowding
+        #                                    increases appearance weight).
+        #   DARE_DENSITY_GATE='suppress' -> density pulls lambda DOWN toward 0 (crowding decreases
+        #                                    appearance weight).
+        #   DARE_DENSITY_GATE='none' (default) -> no-op, unchanged behavior.
+        # DARE_DENSITY_RADIUS: neighbor-search radius in units of the detection's own box diagonal
+        #   (scale-invariant). DARE_DENSITY_STRENGTH: saturation scale for the neighbor-count ->
+        #   [0,1] density factor (density_factor = 1 - exp(-n_neighbors / strength)).
+        self.density_gate = os.environ.get('DARE_DENSITY_GATE', 'none')  # 'none' | 'boost' | 'suppress'
+        self.density_radius = float(os.environ.get('DARE_DENSITY_RADIUS', '3.0'))
+        self.density_strength = float(os.environ.get('DARE_DENSITY_STRENGTH', '2.0'))
+
         # IoU-feasibility gate on the first-pass fused cost. Decomposition (2026-07-20) showed
         # the appearance term manufactures FP by letting a low ReID distance pull a
         # geometrically-implausible (low-IoU) pair under match_thresh. This masks any pair whose
@@ -471,17 +501,41 @@ class BYTETracker(object):
             return feat.cpu().numpy()
         return fmap.mean([2, 3]).squeeze().cpu().numpy()
 
+    def _local_density_factor(self, detections):
+        """Per-detection [0,1] local-crowding factor for the density gate (2026-07-31).
+        n_neighbors = count of OTHER detections in the same frame whose center falls within
+        density_radius * this detection's own box diagonal (scale-normalized -- the same
+        radius multiple means the same thing for a tiny pedestrian and a large truck).
+        factor = 1 - exp(-n_neighbors / density_strength): 0 neighbors -> 0, saturates to 1
+        as neighbors accumulate, scaled by density_strength."""
+        centers = np.array([[d.tlwh[0] + d.tlwh[2] / 2, d.tlwh[1] + d.tlwh[3] / 2]
+                             for d in detections], dtype=np.float32)
+        diags = np.array([np.hypot(d.tlwh[2], d.tlwh[3]) for d in detections], dtype=np.float32)
+        diffs = centers[:, None, :] - centers[None, :, :]
+        dists = np.linalg.norm(diffs, axis=2)
+        radii = self.density_radius * diags
+        within = dists <= radii[:, None]
+        np.fill_diagonal(within, False)  # a detection is never its own neighbor
+        n_neighbors = within.sum(axis=1).astype(np.float32)
+        return 1.0 - np.exp(-n_neighbors / self.density_strength)
+
     def _gated_lambda(self, detections):
         """Appearance weight for the fused cost. Constant self.reid_lambda unless
-        DARE_LAMBDA_GATE='size' and/or DARE_LAMBDA_CLASS_EXCLUDE is set, in which case a
-        per-detection [n_det] vector is returned (broadcasts over the columns/detections
-        of the cost matrix):
+        DARE_LAMBDA_GATE='size', DARE_LAMBDA_CLASS_EXCLUDE, and/or DARE_DENSITY_GATE is set,
+        in which case a per-detection [n_det] vector is returned (broadcasts over the
+        columns/detections of the cost matrix):
           size gate: tiny targets (area<=gate_lo) get lambda 0 (IoU only — no reliable
             identity in a few-pixel crop); large targets (area>=gate_hi) get the full
             lambda; linear ramp between. gate_hi<=gate_lo => hard gate at gate_lo.
           class-exclude: forces lambda 0 for detections whose class is in the exclude
-            set, on top of (composes with) whatever the size gate already produced."""
+            set, on top of (composes with) whatever the size gate already produced.
+          density gate: pulls lambda toward reid_lambda ('boost') or toward 0 ('suppress')
+            in proportion to local crowding, on top of (composes with) the above."""
         if len(detections) == 0:
+            return self.reid_lambda
+        needs_vector = (self.lambda_gate == 'size' or self.lambda_class_exclude
+                        or self.density_gate in ('boost', 'suppress'))
+        if not needs_vector:
             return self.reid_lambda
         if self.lambda_gate == 'size':
             areas = np.array([d.tlwh[2] * d.tlwh[3] for d in detections], dtype=np.float32)
@@ -490,13 +544,17 @@ class BYTETracker(object):
             else:
                 ramp = np.clip((areas - self.gate_lo) / (self.gate_hi - self.gate_lo), 0.0, 1.0)
             lam = self.reid_lambda * ramp
-        elif self.lambda_class_exclude:
-            lam = np.full(len(detections), self.reid_lambda, dtype=np.float32)
         else:
-            return self.reid_lambda
+            lam = np.full(len(detections), self.reid_lambda, dtype=np.float32)
         if self.lambda_class_exclude:
             cls_arr = np.array([d.cls for d in detections], dtype=np.int64)
             lam = np.where(np.isin(cls_arr, list(self.lambda_class_exclude)), 0.0, lam)
+        if self.density_gate in ('boost', 'suppress'):
+            density_factor = self._local_density_factor(detections)
+            if self.density_gate == 'boost':
+                lam = lam + (self.reid_lambda - lam) * density_factor
+            else:  # 'suppress'
+                lam = lam * (1.0 - density_factor)
         return lam
 
     def _class_block(self, dists, tracks, dets):
