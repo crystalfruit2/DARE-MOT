@@ -1,4 +1,5 @@
 # vim: expandtab:ts=4:sw=4
+import os
 import numpy as np
 import scipy.linalg
 
@@ -67,7 +68,9 @@ class KalmanFilter(object):
         # the model. This is a bit hacky.
         self._std_weight_position = 1. / 20
         self._std_weight_velocity = 1. / 160
-        self._std_weight_acceleration = 1. / 160  # CA only; same scale as velocity noise
+        # CA only. Originally set by analogy to the velocity weight (never swept) -- overridable
+        # via DARE_KF_ACCEL_NOISE for the 2026-07-31 hyperparameter sweep.
+        self._std_weight_acceleration = float(os.environ.get('DARE_KF_ACCEL_NOISE', 1. / 160))
 
     def initiate(self, measurement):
         """Create track from unassociated measurement.
