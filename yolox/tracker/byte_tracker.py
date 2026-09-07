@@ -468,6 +468,15 @@ class BYTETracker(object):
         STrack.dare_diag = self.dare_diag
         STrack.gamma_devs = []
 
+        # --- Frame-level appearance-residual logger (Round-3 candidate #1 diagnostic) ---
+        # DARE_APPRES_LOG=<dir> writes one CSV per sequence of the per-match appearance-cost
+        # residual the tracker ALREADY computes for association. Pure instrumentation: nothing
+        # written here is read back by any association stage, so a run with it on produces
+        # byte-identical tracking output to one with it off. Empty (default) = fully off.
+        self.appres_log = os.environ.get('DARE_APPRES_LOG', '').strip()
+        self._appres_fh = None
+        self._appres_seq = None
+
         # --- FEATURE EXTRACTOR (ReID appearance embedding) ---
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         # DARE_REID selects the embedding:
@@ -599,6 +608,58 @@ class BYTETracker(object):
             aw_factor = self._aw_factor(reid_dists)
             lam = lam + (self.reid_lambda - lam) * aw_factor
         return lam
+
+    def _log_appearance_residuals(self, img_info, strack_pool, detections, matches,
+                                  reid_dists, lam):
+        """Diagnostic only (DARE_APPRES_LOG=<dir>). Never read back -- cannot change tracking.
+
+        For every first-association match this records reid_dists[i, j], which is exactly
+        1 - cos(F^{t-1}_i, f^t_j): how far the matched detection's embedding sits from that
+        track's own aggregated template. Round-3 candidate #1 claims per-track residuals are
+        mutually independent under ordinary nuisance (blur, rotation, individual occlusion)
+        but move together when a scene-wide ground-sample-distance change (drone zoom /
+        altitude / gimbal) shifts every object's appearance in the same frame. The cross-track
+        median of one frame's column is the common-mode statistic such a gate would key on;
+        this logger emits the raw column so the existence of synchronised excursions can be
+        tested before any gate is written.
+
+        Pairs where either side had no embedding are flagged valid=0: embedding_distance_safe
+        fills those with a constant 1.0, which would otherwise masquerade as a huge residual.
+        """
+        try:
+            seq = str(img_info[4][0]).replace(chr(92), '/').split('/')[0]
+        except Exception:
+            seq = 'unknown'
+
+        if seq != self._appres_seq:
+            if self._appres_fh is not None:
+                self._appres_fh.close()
+            os.makedirs(self.appres_log, exist_ok=True)
+            self._appres_fh = open(os.path.join(self.appres_log, seq + '.csv'), 'w')
+            print('seq,frame,track_id,cls,resid,valid,area,tracklet_len,'
+                  'was_lost,lam,n_match,n_valid,n_pool,n_det', file=self._appres_fh)
+            self._appres_seq = seq
+
+        rows = []
+        n_valid = 0
+        for itracked, idet in matches:
+            trk = strack_pool[itracked]
+            det = detections[idet]
+            valid = int(trk.smooth_feat is not None and det.curr_feat is not None)
+            n_valid += valid
+            tlwh = det.tlwh
+            lam_j = float(lam[idet]) if isinstance(lam, np.ndarray) else float(lam)
+            rows.append((seq, self.frame_id, trk.track_id, int(det.cls),
+                         float(reid_dists[itracked, idet]), valid,
+                         float(tlwh[2] * tlwh[3]), int(trk.tracklet_len),
+                         int(trk.state != TrackState.Tracked), lam_j))
+
+        n_match = len(rows)
+        n_pool, n_det = len(strack_pool), len(detections)
+        for r in rows:
+            print('%s,%d,%d,%d,%.6f,%d,%.1f,%d,%d,%.4f,%d,%d,%d,%d'
+                  % (r + (n_match, n_valid, n_pool, n_det)), file=self._appres_fh)
+        self._appres_fh.flush()
 
     def _class_block(self, dists, tracks, dets):
         """In-place cross-class veto (DARE_CLASS_BLOCK=1 only): dists[i,j] = inf wherever
@@ -916,6 +977,10 @@ class BYTETracker(object):
         dists = self._class_block(dists, strack_pool, detections)
 
         matches, u_track, u_detection = matching.linear_assignment(dists, thresh=self.args.match_thresh)
+
+        if self.appres_log:
+            self._log_appearance_residuals(img_info, strack_pool, detections,
+                                           matches, reid_dists, lam)
 
         for itracked, idet in matches:
             track = strack_pool[itracked]

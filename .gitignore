@@ -203,3 +203,26 @@ _mc_*.log
 _cmc_residual_logs/
 _cmc_gate_decisive/
 _cmc_*.log
+
+# Session diagnostic scratch — bulk data emitted by the _<tag>_*.py analysis scripts
+# (Round 2/3/4 novelty screening, _verify_* adversarial checks, etc). Same rule as the
+# blocks above: KEEP the .py scripts (they back the verdicts and before/after tables),
+# IGNORE the regenerable data they emit. All numbers live in the vault
+# (Projects/Dare_Mot/experiments/experiment-log.md). Added 2026-09-07 after ~229 MB of
+# _r33_* / _verify_* CSVs (one file 72 MB) showed up untracked at repo root.
+# Extension globs cover any future diagnostic prefix (_moveX_, _r5_, …).
+_*.csv
+_*.npy
+_*.npz
+_*.pkl
+_*.parquet
+_*.feather
+_r33_affines/
+_verify_out_*/
+_appres_*/
+
+# Preferred home for ALL future diagnostic output (logs, CSVs, dumps, overlay dirs).
+# New analysis sessions must write here, not to repo root — keeps `git status` clean
+# without needing a new ignore line per diagnostic family. Scripts still live at root
+# and are committed normally.
+_scratch/
