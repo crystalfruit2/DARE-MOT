@@ -32,6 +32,10 @@ ARMS = [
     ("mc_dare_cv_lap0512", MAIN, "CV-DARE (fresh baseline)"),
     ("mc_dare_cv_cmcfix_j", WT, "CV-DARE + CMC fixed/parity (Joseph)"),
     ("mc_bt_ca_cmcfix_j", WT, "ByteTrack + CA-KF + CMC fixed (Joseph)"),
+    # scale-mode factorial (_run_cmc_factorial_scale_2026-09-10.ps1)
+    ("mc_bt_cmcscale_j", WT, "ByteTrack + CMC scale (Joseph)"),
+    ("mc_bt_ca_cmcscale_j", WT, "ByteTrack + CA-KF + CMC scale (Joseph)"),
+    ("mc_dare_cv_cmcscale_j", WT, "CV-DARE + CMC scale (Joseph)"),
 ]
 
 
