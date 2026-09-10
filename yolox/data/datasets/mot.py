@@ -20,6 +20,7 @@ class MOTDataset(Dataset):
         name="train",
         img_size=(608, 1088),
         preproc=None,
+        ignore_fill=None,
     ):
         """
         COCO dataset initialization. Annotation data are read into memory by COCO API.
@@ -45,6 +46,14 @@ class MOTDataset(Dataset):
         self.name = name
         self.img_size = img_size
         self.preproc = preproc
+        # Optional (default off): paint each image's "ignore_regions" ([[x,y,w,h],...], written by
+        # tools/convert_visdrone_10c.py) with this BGR colour, so ignored regions are neither
+        # positives nor background (2026-09-10).
+        self.ignore_fill = ignore_fill
+        self.ignore_regions = {}
+        if ignore_fill is not None:
+            self.ignore_regions = {i: im["ignore_regions"] for i, im in self.coco.imgs.items()
+                                   if im.get("ignore_regions")}
 
     def __len__(self):
         return len(self.ids)
@@ -100,6 +109,9 @@ class MOTDataset(Dataset):
         )
         img = cv2.imread(img_file)
         assert img is not None
+        for x, y, w, h in self.ignore_regions.get(id_, ()):
+            x0, y0 = max(int(round(x)), 0), max(int(round(y)), 0)
+            img[y0:max(int(round(y + h)), y0), x0:max(int(round(x + w)), x0)] = self.ignore_fill
 
         return img, res.copy(), img_info, np.array([id_])
 

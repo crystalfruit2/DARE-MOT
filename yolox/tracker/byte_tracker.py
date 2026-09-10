@@ -454,6 +454,7 @@ class BYTETracker(object):
         #   DARE_CLASS_BLOCK=1 forbids cross-class matches in every association stage (inf cost,
         #   same mechanism as the IoU-feasibility gate). Default 0 = unchanged agnostic behavior.
         self.class_block = os.environ.get('DARE_CLASS_BLOCK', '0') == '1'
+        self.max_class = int(os.environ.get('DARE_MAX_CLASS', '-1'))  # see update(); -1 = off
 
         # Fix #1 (foreground-focused appearance) & Fix #3 (re-association age cap) — meeting-brief-2026-07-16.
         # All default to reproduce the current real-appearance baseline exactly (no change when unset).
@@ -899,6 +900,12 @@ class BYTETracker(object):
             bboxes = output_results[:, :4]  # x1y1x2y2
             # YOLOX postprocess col 6 = predicted class (model head id, 0..num_classes-1)
             classes = output_results[:, 6] if output_results.shape[1] > 6 else np.full(len(output_results), -1)
+            # DARE_MAX_CLASS (default -1 = off): drop detections whose model class id is above it.
+            # The 10-class detector (yolox_x_visdrone_10c) keeps the 5 evaluated classes at 0..4, so
+            # DARE_MAX_CLASS=4 tracks only those (2026-09-10).
+            if self.max_class >= 0:
+                keep = classes <= self.max_class
+                output_results, scores, bboxes, classes = output_results[keep], scores[keep], bboxes[keep], classes[keep]
         if raw_frame is not None:
             img_h, img_w = raw_frame.shape[:2]
         else:
