@@ -3,7 +3,9 @@ import numpy as np
 import lap
 from scipy.spatial.distance import cdist
 
-from cython_bbox import bbox_overlaps as bbox_ious
+# 2026-09-14: SAC blocks cython_bbox on this machine; reuse the guarded import in
+# yolox/tracker/matching.py (cython when allowed, float64 numpy transcription otherwise).
+from yolox.tracker.matching import bbox_ious
 from yolox.motdt_tracker import kalman_filter
 
 

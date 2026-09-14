@@ -10,6 +10,12 @@ Pre-registered: LEAK if mean AP50 drop (ep2 -> ep8) on the 6 leaked seqs >= 2x t
 
 Same detection path as MOTEvaluator/_detdump_val7.py (fp16, fused, test_conf 0.001, class-wise NMS 0.7).
 Usage: python _det_ap_perseq.py <ckpt> [<ckpt> ...]   -> _scratch/det_ap_perseq/<tag>.json + table
+
+2026-09-14: also takes 10-class checkpoints, for the clean-ep3 vs old-ep2 split (experiment-log
+2026-09-11 "the decisive split is per sequence"). The exp is chosen from the checkpoint's own head
+width (a 10-class head will not load into a 5-class exp), detections of model ids 5..9 are dropped,
+and COCOeval is pinned to category ids 1..5 -- so both detectors are scored on identical GT with
+identical category averaging, and the AP50 numbers stay comparable with the 60.7 / 56.0 of record.
 """
 import os
 import sys
@@ -22,9 +28,19 @@ from yolox.exp import get_exp
 from yolox.utils import fuse_model, postprocess
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-EXP = "exps/example/mot/yolox_x_visdrone_mc_val7.py"
+EXP_BY_NCLS = {5: "exps/example/mot/yolox_x_visdrone_mc_val7.py",
+               10: "exps/example/mot/yolox_x_visdrone_10c_val7.py"}
 OUT = os.path.join(HERE, "_scratch", "det_ap_perseq")
 HELDOUT = "uav0000339_00001_v"
+EVAL_MAX_CLASS = 4          # model ids 0..4 = pedestrian, car, van, truck, bus (the evaluated 5)
+EVAL_CAT_IDS = [1, 2, 3, 4, 5]
+
+
+def head_ncls(ckpt_path):
+    """Number of classes the checkpoint's detection head was trained with."""
+    sd = torch.load(ckpt_path, map_location="cpu")["model"]
+    k = next(k for k in sd if "cls_preds" in k and k.endswith("weight"))
+    return int(sd[k].shape[0])
 
 
 @torch.no_grad()
@@ -47,6 +63,8 @@ def detect(ckpt_path, exp, loader):
         out = out.float().cpu()
         b = out[:, :4] / scale
         for k in range(out.shape[0]):
+            if int(out[k, 6]) > EVAL_MAX_CLASS:   # people/bicycle/tricycle/awning-tricycle/motor
+                continue
             x1, y1, x2, y2 = b[k].tolist()
             dets.append({"image_id": int(ids[0]),
                          "category_id": int(ds.class_ids[int(out[k, 6])]),
@@ -67,10 +85,12 @@ def ap_by_seq(coco, dets):
     for vid, img_ids in sorted(by_vid.items()):
         e = COCOeval(coco, dt, "bbox")
         e.params.imgIds = img_ids
+        e.params.catIds = EVAL_CAT_IDS
         with contextlib.redirect_stdout(io.StringIO()):
             e.evaluate(); e.accumulate(); e.summarize()
         res[vids[vid]] = {"AP": 100 * e.stats[0], "AP50": 100 * e.stats[1]}
     e = COCOeval(coco, dt, "bbox")
+    e.params.catIds = EVAL_CAT_IDS
     with contextlib.redirect_stdout(io.StringIO()):
         e.evaluate(); e.accumulate(); e.summarize()
     res["ALL"] = {"AP": 100 * e.stats[0], "AP50": 100 * e.stats[1]}
@@ -79,11 +99,19 @@ def ap_by_seq(coco, dets):
 
 if __name__ == "__main__":
     torch.backends.cudnn.benchmark = False
-    exp = get_exp(EXP, None)
-    exp.data_num_workers = 0
-    loader = exp.get_eval_loader(batch_size=1, is_distributed=False)
-    coco = loader.dataset.coco
     os.makedirs(OUT, exist_ok=True)
+    built = {}                             # num_classes -> (exp, loader, coco), built on demand
+
+    def harness(ncls):
+        if ncls not in built:
+            if ncls not in EXP_BY_NCLS:
+                raise SystemExit(f"no val exp for a {ncls}-class head")
+            e = get_exp(EXP_BY_NCLS[ncls], None)
+            e.data_num_workers = 0
+            ld = e.get_eval_loader(batch_size=1, is_distributed=False)
+            built[ncls] = (e, ld, ld.dataset.coco)
+        return built[ncls]
+
     table = {}
     for ck in sys.argv[1:]:
         tag = os.path.basename(os.path.dirname(ck)) + "__" + os.path.basename(ck).replace(".pth.tar", "")
@@ -91,6 +119,9 @@ if __name__ == "__main__":
         if os.path.exists(cache):
             table[tag] = json.load(open(cache))
         else:
+            ncls = head_ncls(ck)
+            exp, loader, coco = harness(ncls)
+            print(f"{tag}: {ncls}-class head -> {EXP_BY_NCLS[ncls]}", flush=True)
             table[tag] = ap_by_seq(coco, detect(ck, exp, loader))
             json.dump(table[tag], open(cache, "w"), indent=1)
         print(f"done {tag}", flush=True)

@@ -1,12 +1,49 @@
+import os
+
 import cv2
 import numpy as np
 import scipy
 import lap
 from scipy.spatial.distance import cdist
 
-from cython_bbox import bbox_overlaps as bbox_ious
 from yolox.tracker import kalman_filter
 import time
+
+# 2026-09-14: Smart App Control started blocking site-packages/cython_bbox*.pyd on this machine
+# ("Uygulama Denetimi ilkesi bu dosyayi engelledi"), the same class of block that hit lapx 0.9.4.
+# The .pyd is unchanged since 2026-07-10, so it is the SAC policy that moved -- and because this import
+# sits in yolox.evaluators' import chain, it took DETECTOR TRAINING down with it, not just tracking.
+# The fallback below is a float64 transcription of cython_bbox 0.1.5's bbox_overlaps, including its
+# +1 pixel convention and its "0.0 when the intersection is empty" branches. Same IEEE ops on the same
+# float64 inputs, so it should reproduce the cython result exactly -- but "should" is not "measured":
+# it is UNVALIDATED against a cached tracker run. Do not report a tracker number produced with the
+# numpy path until the byte-identical repro (_run_lap0512_repro.ps1 style) has been run.
+try:
+    from cython_bbox import bbox_overlaps as _cython_bbox_ious
+except ImportError as _e:          # SAC block, or no compiled extension
+    _cython_bbox_ious, _cython_bbox_err = None, _e
+
+
+def _numpy_bbox_ious(boxes, query_boxes):
+    """float64 transcription of cython_bbox.bbox_overlaps: (N,4) x (K,4) -> (N,K)."""
+    boxes = np.ascontiguousarray(boxes, dtype=np.float64)
+    query_boxes = np.ascontiguousarray(query_boxes, dtype=np.float64)
+    iw = (np.minimum(boxes[:, None, 2], query_boxes[None, :, 2])
+          - np.maximum(boxes[:, None, 0], query_boxes[None, :, 0]) + 1.0)
+    ih = (np.minimum(boxes[:, None, 3], query_boxes[None, :, 3])
+          - np.maximum(boxes[:, None, 1], query_boxes[None, :, 1]) + 1.0)
+    inter = np.where((iw > 0) & (ih > 0), iw * ih, 0.0)
+    area_b = (boxes[:, 2] - boxes[:, 0] + 1.0) * (boxes[:, 3] - boxes[:, 1] + 1.0)
+    area_q = (query_boxes[:, 2] - query_boxes[:, 0] + 1.0) * (query_boxes[:, 3] - query_boxes[:, 1] + 1.0)
+    ua = area_b[:, None] + area_q[None, :] - inter
+    return np.where(inter > 0, inter / ua, 0.0)
+
+
+def bbox_ious(boxes, query_boxes):
+    """cython_bbox when SAC allows it (the numbers of record), numpy transcription otherwise."""
+    if _cython_bbox_ious is not None and os.environ.get("DARE_BBOX_IOU", "cython") != "numpy":
+        return _cython_bbox_ious(boxes, query_boxes)
+    return _numpy_bbox_ious(boxes, query_boxes)
 
 def merge_matches(m1, m2, shape):
     O,P,Q = shape

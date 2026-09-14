@@ -36,6 +36,11 @@ ARMS = [
     ("mc_bt_cmcscale_j", WT, "ByteTrack + CMC scale (Joseph)"),
     ("mc_bt_ca_cmcscale_j", WT, "ByteTrack + CA-KF + CMC scale (Joseph)"),
     ("mc_dare_cv_cmcscale_j", WT, "CV-DARE + CMC scale (Joseph)"),
+    # clean 10-class detector, DARE_MAX_CLASS=4 (_run_10c_eval_2026-09-11.ps1)
+    ("mc10_bt", WT, "10c: ByteTrack"),
+    ("mc10_dare_cv", WT, "10c: CV-DARE"),
+    ("mc10_bt_cmcscale_j", WT, "10c: ByteTrack + CMC scale"),
+    ("mc10_dare_cv_cmcscale_j", WT, "10c: CV-DARE + CMC scale"),
 ]
 
 
