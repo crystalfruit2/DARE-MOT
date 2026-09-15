@@ -40,10 +40,12 @@ def make_tracker(args):
     if which == "ocsort":
         from baselines.adapters import OCSortAdapter
         return OCSortAdapter(args)
-    if which in ("botsort", "deepocsort"):
-        raise NotImplementedError(
-            f"DARE_TRACKER={which} adapter not built yet (needs shared-ReID + GMC/CMC wiring; "
-            "Path-1 build step 5). OC-SORT + selection hook are in.")
+    if which == "botsort":
+        from baselines.adapters import BoTSORTAdapter
+        return BoTSORTAdapter(args)
+    if which == "deepocsort":
+        from baselines.adapters import DeepOCSORTAdapter
+        return DeepOCSORTAdapter(args)
     raise ValueError(f"unknown DARE_TRACKER={which!r} (dare|bytetrack|ocsort|botsort|deepocsort)")
 
 
