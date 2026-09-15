@@ -292,19 +292,22 @@ class BoTSORTAdapter(_Base):
     def __init__(self, args, embedder=None):
         _require_lap()
         from botsort.bot_sort import BoTSORT
-        emb = embedder if embedder is not None else SharedOSNet()
+        # DARE_P1_BOT_REID=0 -> BoT-SORT without ReID (GMC + BYTE only), the ablation that separates its
+        # appearance term from its camera-motion compensation (2026-09-15 review follow-up).
+        with_reid = os.environ.get("DARE_P1_BOT_REID", "1") != "0"
+        emb = (embedder if embedder is not None else SharedOSNet()) if with_reid else None
         a = SimpleNamespace(
             track_high_thresh=args.track_thresh,
             track_low_thresh=0.1,
             new_track_thresh=args.track_thresh + 0.1,
             track_buffer=args.track_buffer,
-            match_thresh=args.match_thresh,
+            match_thresh=float(os.environ.get("DARE_P1_BOT_MATCH", args.match_thresh)),  # upstream default 0.8
             proximity_thresh=0.5,
             appearance_thresh=0.25,
-            with_reid=True,
+            with_reid=with_reid,
             cmc_method=os.environ.get("DARE_P1_CMC", "sparseOptFlow"),
             mot20=bool(getattr(args, "mot20", False)),
-            encoder=_BotEncoder(emb),
+            encoder=_BotEncoder(emb) if with_reid else None,
         )
         self.tracker = BoTSORT(a, frame_rate=30)
 
@@ -331,7 +334,9 @@ class DeepOCSORTAdapter(_Base):
         from deepocsort.ocsort import OCSort as DeepOCSort
         emb = embedder if embedder is not None else SharedOSNet()
         self.tracker = DeepOCSort(
-            det_thresh=args.track_thresh, max_age=args.track_buffer, min_hits=3, iou_threshold=0.3,
+            det_thresh=args.track_thresh, max_age=args.track_buffer,
+            min_hits=int(os.environ.get("DARE_P1_DOC_MINHITS", "3")),  # sensitivity knob (upstream 3)
+            iou_threshold=0.3,
             delta_t=3, asso_func="iou", inertia=0.2, w_association_emb=0.75, alpha_fixed_emb=0.95,
             aw_param=0.5, embedding_off=False, cmc_off=False, aw_off=False, new_kf_off=False,
             grid_off=True, embedder=_DeepOCEmbedder(emb),

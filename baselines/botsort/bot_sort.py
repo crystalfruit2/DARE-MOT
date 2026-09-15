@@ -1,3 +1,5 @@
+import os
+
 import cv2
 import numpy as np
 from collections import deque
@@ -70,6 +72,15 @@ class STrack(BaseTrack):
             R = H[:2, :2]
             R8x8 = np.kron(np.eye(4, dtype=float), R)
             t = H[:2, 2]
+            # DARE-MOT sensitivity knob (2026-09-15, default = upstream): DARE_P1_BOT_WARP=scale applies the
+            # scale-exact warp on this xywh state -- R on (x,y) and (vx,vy), isotropic s on (w,h,vw,vh) -- the
+            # xywh analogue of DARE's 'scale' CMC mode. Upstream behaviour is untouched when unset.
+            if os.environ.get("DARE_P1_BOT_WARP", "bot") == "scale":
+                s = float(np.sqrt(abs(np.linalg.det(R))))
+                R8x8 = np.eye(8)
+                R8x8[0:2, 0:2] = R
+                R8x8[4:6, 4:6] = R
+                R8x8[2, 2] = R8x8[3, 3] = R8x8[6, 6] = R8x8[7, 7] = s
 
             for i, (mean, cov) in enumerate(zip(multi_mean, multi_covariance)):
                 mean = R8x8.dot(mean)
