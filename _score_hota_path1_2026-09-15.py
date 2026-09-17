@@ -34,6 +34,8 @@ ARMS = [
     ("CV-DARE+scaleCMC", "p1ref_dare_cv_cmcscale_j"),
     ("BT+scaleCMC_ds4", "lat10_bt_cmcscale_j_ds4"),
     ("BT+scaleCMC_ds8", "lat10_bt_cmcscale_j_ds8"),
+    ("BT+parityCMC", "mc10_bt_cmcparity_j"),
+    ("CV-DARE+parityCMC", "mc10_dare_cv_cmcparity_j"),
 ]
 
 

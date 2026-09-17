@@ -29,6 +29,9 @@ ARMS = [
     ("lat10_bt_cmcscale_j_ds4", WT, "ByteTrack + scale CMC (ds4)"),
     ("lat10_bt_cmcscale_j_ds8", WT, "ByteTrack + scale CMC (ds8)"),
     ("p1ref_dare_cv_cmcscale_j", WT, "CV-DARE + scale CMC"),
+    # evening: parity (= BoT-SORT's warp recipe on the xyah state) vs scale on the REPORTED detector D3
+    ("mc10_bt_cmcparity_j", WT, "ByteTrack + parity CMC"),
+    ("mc10_dare_cv_cmcparity_j", WT, "CV-DARE + parity CMC"),
 ]
 
 
