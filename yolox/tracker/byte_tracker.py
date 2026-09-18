@@ -171,6 +171,115 @@ class STrack(BaseTrack):
                 stracks[i].mean = mean
                 stracks[i].covariance = cov
 
+    # ------------------------------------------------------------------------------------
+    # Camera Motion Compensation, CORRECTED (2026-09-10). Ported from exp/cmc-move1, whose
+    # multi_gmc applied kron(I, sR) directly to the xyah state and so rotated the
+    # dimensionless aspect ratio into the pixel height -- corrupting predicted WIDTH by
+    # ~theta*h^2/w (experiment-log 2026-09-07, Round 4 zone D). Modes (DARE_CMC_FIX):
+    #   'parity' (default) -- BoT-SORT recipe applied where it is dimensionally valid: convert
+    #                         xyah -> xywh (incl. velocity/acceleration by the chain rule),
+    #                         apply kron(I, sR) + t exactly as BoT-SORT, convert back. The
+    #                         covariance goes through a central-difference Jacobian of that
+    #                         exact nonlinear map, so one code path serves CV (8-d) and CA (12-d).
+    #   'scale'            -- physically exact for an axis-aligned box under a similarity:
+    #                         warp centre/velocity/acceleration, scale h-derivatives by s,
+    #                         leave the aspect ratio alone (second ablation arm).
+    #   'bug'              -- the original exp/cmc-move1 behaviour, kron(I, sR) on xyah,
+    #                         kept only to reproduce the July numbers.
+    # ------------------------------------------------------------------------------------
+    @staticmethod
+    def _xyah_to_xywh(m):
+        n = len(m) // 4
+        a, h = m[2], m[3]
+        out = m.copy()
+        out[2] = a * h
+        if n >= 2:
+            va, vh = m[6], m[7]
+            out[6] = va * h + a * vh
+        if n >= 3:
+            aa, ah = m[10], m[11]
+            out[10] = aa * h + 2.0 * va * vh + a * ah
+        return out
+
+    @staticmethod
+    def _xywh_to_xyah(m):
+        n = len(m) // 4
+        w, h = m[2], m[3]
+        h = h if abs(h) > 1e-6 else (1e-6 if h >= 0 else -1e-6)
+        out = m.copy()
+        a = w / h
+        out[2] = a
+        out[3] = h
+        if n >= 2:
+            vw, vh = m[6], m[7]
+            va = (vw - a * vh) / h
+            out[6] = va
+        if n >= 3:
+            aw, ah = m[10], m[11]
+            out[10] = (aw - 2.0 * va * vh - a * ah) / h
+        return out
+
+    @staticmethod
+    def _jac_xyah_to_xywh(m):
+        """Analytic d(xywh)/d(xyah) (chain rule on w = a*h and its time derivatives)."""
+        d = len(m)
+        J = np.eye(d)
+        a, h = m[2], m[3]
+        J[2, 2], J[2, 3] = h, a
+        if d >= 8:
+            va, vh = m[6], m[7]
+            J[6, 2], J[6, 3], J[6, 6], J[6, 7] = vh, va, h, a
+        if d >= 12:
+            aa, ah = m[10], m[11]
+            J[10, 2], J[10, 3] = ah, aa
+            J[10, 6], J[10, 7] = 2.0 * vh, 2.0 * va
+            J[10, 10], J[10, 11] = h, a
+        return J
+
+    @staticmethod
+    def _warp_parity(m, R, t):
+        k = len(m) // 2
+        z = STrack._xyah_to_xywh(m)
+        z = np.kron(np.eye(k), R).dot(z)
+        z[:2] += t
+        return STrack._xywh_to_xyah(z)
+
+    @staticmethod
+    def multi_gmc(stracks, H=np.eye(2, 3), mode='parity'):
+        if len(stracks) == 0:
+            return
+        R = H[:2, :2]
+        t = H[:2, 2]
+        s = float(np.sqrt(abs(np.linalg.det(R))))
+        for st in stracks:
+            m = np.asarray(st.mean, dtype=float)
+            P = st.covariance
+            d = len(m)
+            if mode == 'bug':
+                A = np.kron(np.eye(d // 2), R)
+                nm = A.dot(m)
+                nm[:2] += t
+                st.mean, st.covariance = nm, A.dot(P).dot(A.T)
+                continue
+            if mode == 'scale':
+                A = np.eye(d)
+                for b in range(0, d, 4):          # (x,y) block of each derivative order
+                    A[b:b + 2, b:b + 2] = R
+                    A[b + 3, b + 3] = s           # h (and vh, ah) scale with s; a untouched
+                nm = A.dot(m)
+                nm[:2] += t
+                st.mean, st.covariance = nm, A.dot(P).dot(A.T)
+                continue
+            nm = STrack._warp_parity(m, R, t)
+            # Exact Jacobian of xywh->xyah o warp o xyah->xywh. xywh->xyah is the exact inverse
+            # of xyah->xywh, so its Jacobian at the warped point is inv(J1(nm)). (A finite-
+            # difference Jacobian broke PSD on long-coasting CA tracks, whose covariance spans
+            # ~14 orders of magnitude.)
+            A = np.kron(np.eye(d // 2), R)
+            J = np.linalg.solve(STrack._jac_xyah_to_xywh(nm), A.dot(STrack._jac_xyah_to_xywh(m)))
+            Pn = J.dot(P).dot(J.T)
+            st.mean, st.covariance = nm, 0.5 * (Pn + Pn.T)
+
     def activate(self, kalman_filter, frame_id):
         """Start a new tracklet"""
         self.kalman_filter = kalman_filter
@@ -335,6 +444,17 @@ class BYTETracker(object):
         self.kalman_filter = KalmanFilter(motion_model=self.kf_motion_model)
         STrack.shared_kalman = self.kalman_filter
 
+        # Camera Motion Compensation (corrected port, see STrack.multi_gmc). DARE_CMC =
+        # none (default) | sparseOptFlow | ecc | orb. Default runs never import the GMC
+        # module, so they stay byte-identical to main.
+        self.cmc_method = os.environ.get('DARE_CMC', 'none')
+        self.cmc_fix = os.environ.get('DARE_CMC_FIX', 'parity')
+        self.gmc = None
+        if self.cmc_method not in ('none', 'None', ''):
+            from baselines.gmc import GMC
+            self.gmc = GMC(method=self.cmc_method,
+                           downscale=int(os.environ.get('DARE_CMC_DOWNSCALE', '2')))
+
         # Ablation knobs (env-overridable; defaults reproduce validated behavior)
         self.lock_on = os.environ.get('DARE_LOCK', '1') == '1'     # kinematic/confidence hard lock
         self.reid_lambda = float(os.environ.get('DARE_LAMBDA', '0.5'))  # appearance weight in fused cost
@@ -454,6 +574,7 @@ class BYTETracker(object):
         #   DARE_CLASS_BLOCK=1 forbids cross-class matches in every association stage (inf cost,
         #   same mechanism as the IoU-feasibility gate). Default 0 = unchanged agnostic behavior.
         self.class_block = os.environ.get('DARE_CLASS_BLOCK', '0') == '1'
+        self.max_class = int(os.environ.get('DARE_MAX_CLASS', '-1'))  # see update(); -1 = off
 
         # Fix #1 (foreground-focused appearance) & Fix #3 (re-association age cap) — meeting-brief-2026-07-16.
         # All default to reproduce the current real-appearance baseline exactly (no change when unset).
@@ -899,6 +1020,12 @@ class BYTETracker(object):
             bboxes = output_results[:, :4]  # x1y1x2y2
             # YOLOX postprocess col 6 = predicted class (model head id, 0..num_classes-1)
             classes = output_results[:, 6] if output_results.shape[1] > 6 else np.full(len(output_results), -1)
+            # DARE_MAX_CLASS (default -1 = off): drop detections whose model class id is above it.
+            # The 10-class detector (yolox_x_visdrone_10c) keeps the 5 evaluated classes at 0..4, so
+            # DARE_MAX_CLASS=4 tracks only those (2026-09-10).
+            if self.max_class >= 0:
+                keep = classes <= self.max_class
+                output_results, scores, bboxes, classes = output_results[keep], scores[keep], bboxes[keep], classes[keep]
         if raw_frame is not None:
             img_h, img_w = raw_frame.shape[:2]
         else:
@@ -948,6 +1075,11 @@ class BYTETracker(object):
             eligible_lost = self.lost_stracks
         strack_pool = joint_stracks(tracked_stracks, eligible_lost)
         STrack.multi_predict(strack_pool)
+
+        if self.gmc is not None and raw_frame is not None:
+            warp = self.gmc.apply(raw_frame, None)
+            STrack.multi_gmc(strack_pool, warp, self.cmc_fix)
+            STrack.multi_gmc(unconfirmed, warp, self.cmc_fix)
 
         iou_dists = matching.iou_distance(strack_pool, detections)
         raw_iou_dists = iou_dists.copy()  # geometry only (1-IoU), before score fusion; used by the IoU gate

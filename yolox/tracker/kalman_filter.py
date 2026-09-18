@@ -71,6 +71,8 @@ class KalmanFilter(object):
         # CA only. Originally set by analogy to the velocity weight (never swept) -- overridable
         # via DARE_KF_ACCEL_NOISE for the 2026-07-31 hyperparameter sweep.
         self._std_weight_acceleration = float(os.environ.get('DARE_KF_ACCEL_NOISE', 1. / 160))
+        # Joseph-form covariance update, default OFF so every existing run stays byte-identical.
+        self.joseph = os.environ.get('DARE_KF_JOSEPH', '0') == '1'
 
     def initiate(self, measurement):
         """Create track from unassociated measurement.
@@ -265,8 +267,18 @@ class KalmanFilter(object):
         innovation = measurement - projected_mean
 
         new_mean = mean + np.dot(innovation, kalman_gain.T)
-        new_covariance = covariance - np.linalg.multi_dot((
-            kalman_gain, projected_cov, kalman_gain.T))
+        if self.joseph:
+            # Joseph-form covariance update (2026-09-10): identical to the line below in exact
+            # arithmetic, but stays PSD. Needed with CMC -- the warp leaves an ill-conditioned P
+            # (cond ~1e7) and P - K S K^T then lost PSD within ~240 frames (Cholesky crash).
+            R = projected_cov - np.linalg.multi_dot((self._update_mat, covariance, self._update_mat.T))
+            IKH = np.eye(len(mean)) - np.dot(kalman_gain, self._update_mat)
+            new_covariance = np.linalg.multi_dot((IKH, covariance, IKH.T)) + \
+                np.linalg.multi_dot((kalman_gain, R, kalman_gain.T))
+            new_covariance = 0.5 * (new_covariance + new_covariance.T)
+        else:
+            new_covariance = covariance - np.linalg.multi_dot((
+                kalman_gain, projected_cov, kalman_gain.T))
         return new_mean, new_covariance
 
     def gating_distance(self, mean, covariance, measurements,
